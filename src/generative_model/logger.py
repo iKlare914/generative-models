@@ -14,14 +14,14 @@ class _TqdmHandler(logging.Handler):
             self.handleError(record)
 
 
-def get_logger(name="my_ddpm"):
+def get_logger(name="generative_model"):
     """Return a package logger; configure its shared console handler once.
 
     Use get_logger().setLevel(logging.DEBUG) to change the package log level.
     """
-    if name != "my_ddpm" and not name.startswith("my_ddpm."):
-        raise ValueError("Logger names must belong to the my_ddpm package.")
-    package_logger = logging.getLogger("my_ddpm")
+    if name != "generative_model" and not name.startswith("generative_model."):
+        raise ValueError("Logger names must belong to the generative_model package.")
+    package_logger = logging.getLogger("generative_model")
     if not package_logger.handlers:
         handler = _TqdmHandler()
         handler.setFormatter(logging.Formatter(

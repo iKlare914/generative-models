@@ -13,11 +13,11 @@ import random
 import numpy as np
 import torch
 
-from my_ddpm.config import TrainerConfig
-from my_ddpm.load_dataset import getCifarLoader
-from my_ddpm.model import UNet
-from my_ddpm.sampler import DDPMSampler, TimestepSampler, make_beta_schedule
-from my_ddpm.trainer import Trainer
+from generative_model.config import TrainerConfig
+from generative_model.load_dataset import getCifarLoader
+from generative_model.model import UNet
+from generative_model.sampler import DDPMSampler, TimestepSampler, make_beta_schedule
+from generative_model.trainer import Trainer
 
 
 def positive_int(value):

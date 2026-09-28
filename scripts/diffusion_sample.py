@@ -10,11 +10,11 @@ from pathlib import Path
 from PIL import Image
 import torch
 
-from my_ddpm.logger import get_logger
-from my_ddpm.model import UNet
-from my_ddpm.sampler import DDIMSampler, DDPMSampler, display_image_uint8, make_beta_schedule
+from generative_model.logger import get_logger
+from generative_model.model import UNet
+from generative_model.sampler import DDIMSampler, DDPMSampler, display_image_uint8, make_beta_schedule
 
-logger = get_logger('my_ddpm.sample')
+logger = get_logger('generative_model.sample')
 
 
 def positive_int(value):

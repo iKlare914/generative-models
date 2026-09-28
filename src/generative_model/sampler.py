@@ -1,7 +1,7 @@
 import math
 import torch as th
 from tqdm.auto import tqdm
-from my_ddpm.logger import get_logger
+from generative_model.logger import get_logger
 from typing import Literal
 import numpy as np
 

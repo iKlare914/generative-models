@@ -1,7 +1,7 @@
-from my_ddpm.load_dataset import getCifarLoader, DataLoader
-from my_ddpm.logger import get_logger
-from my_ddpm.sampler import DDIMSampler, DDPMSampler, TimestepSampler, display_image_uint8
-from my_ddpm.config import TrainerConfig
+from generative_model.load_dataset import getCifarLoader, DataLoader
+from generative_model.logger import get_logger
+from generative_model.sampler import DDIMSampler, DDPMSampler, TimestepSampler, display_image_uint8
+from generative_model.config import TrainerConfig
 from uuid import uuid4
 
 import torch as th
