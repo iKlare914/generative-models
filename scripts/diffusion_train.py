@@ -1,4 +1,4 @@
-"""Train an unconditional DDPM on square CIFAR-10 images.
+"""Train an unconditional DDPM or flow matching model on square CIFAR-10 images.
 
 Example:
     python scripts/diffusion_train.py --image-size 32 --epochs 1 --device cuda
@@ -16,7 +16,7 @@ import torch
 from generative_model.config import TrainerConfig
 from generative_model.load_dataset import getCifarLoader
 from generative_model.model import UNet
-from generative_model.sampler import DDPMSampler, TimestepSampler, make_beta_schedule
+from generative_model.sampler import DDPMSampler, FMSampler, FMTimestepSampler, TimestepSampler, make_beta_schedule
 from generative_model.trainer import Trainer
 
 
@@ -41,7 +41,9 @@ def parse_args(argv=None):
     parser.add_argument('--channel-mult', type=positive_int, nargs='+', default=[1, 2, 4])
     parser.add_argument('--attention-resolutions', type=positive_int, nargs='*', default=[16, 8], help='Actual feature-map side lengths in encoder AND decoder, not downsampling factors; empty disables their attention. Bottleneck retains attention.')
     parser.add_argument('--num-heads', type=positive_int, default=4)
-    parser.add_argument('--timesteps', type=positive_int, default=1000)
+    parser.add_argument('--method', choices=['ddpm', 'fm'], default='ddpm')
+    parser.add_argument('--timesteps', type=positive_int, default=1000, help='DDPM only: diffusion schedule length')
+    parser.add_argument('--fm-step', type=float, default=0.01, help='FM only: Euler step size in (0, 1] for logged samples; does not discretize training time')
     parser.add_argument('--dataset', default='uoft-cs/cifar10', help='Hugging Face CIFAR-format dataset repository')
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--cache-dir', type=Path, default=Path('.cache/huggingface/datasets'))
@@ -73,8 +75,10 @@ def parse_args(argv=None):
         parser.error('--dropout must be between 0 and 1')
     if not np.isfinite(args.weight_decay) or args.weight_decay < 0:
         parser.error('--weight-decay must be finite and nonnegative')
-    if args.timesteps <= 50:
+    if args.method == 'ddpm' and args.timesteps <= 50:
         parser.error('--timesteps must exceed 50 for this beta schedule')
+    if args.method == 'fm' and (not np.isfinite(args.fm_step) or not 0 < args.fm_step <= 1):
+        parser.error('--fm-step must be finite and in (0, 1]')
     if args.resume and not any(args.save_dir.glob('*_*_checkpoint.pt')):
         parser.error('--resume requires a checkpoint in --save-dir')
     return args
@@ -113,7 +117,12 @@ def main(argv=None):
         attention_resolution=tuple(args.attention_resolutions),
         num_heads=args.num_heads, image_size=args.image_size,
     ).to(device)
-    sampler = DDPMSampler(model, betas=make_beta_schedule(args.timesteps), device=device)
+    if args.method == 'fm':
+        sampler = FMSampler(args.fm_step, model, device=device)
+        timestep_sampler = FMTimestepSampler('Uniform')
+    else:
+        sampler = DDPMSampler(model, betas=make_beta_schedule(args.timesteps), device=device)
+        timestep_sampler = TimestepSampler(args.timesteps, 'Uniform')
     loader = getCifarLoader(
         args.dataset, 'train', batch_size=args.batch_size, num_workers=args.num_workers,
         image_size=args.image_size, cache_dir=str(args.cache_dir),
@@ -121,7 +130,7 @@ def main(argv=None):
     print(f'Training on {len(loader.dataset)} images; {len(loader)} batches per epoch', flush=True)
     Trainer(
         model=model, data=loader, diffusion_sampler=sampler,
-        timestep_sampler=TimestepSampler(args.timesteps, 'Uniform'), config=config,
+        timestep_sampler=timestep_sampler, config=config,
     ).train()
 
 

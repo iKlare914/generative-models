@@ -1,6 +1,6 @@
 from generative_model.load_dataset import getCifarLoader, DataLoader
 from generative_model.logger import get_logger
-from generative_model.sampler import DDIMSampler, DDPMSampler, TimestepSampler, display_image_uint8
+from generative_model.sampler import DDIMSampler, DDPMSampler, TimestepSampler, display_image_uint8, FMSampler, FMTimestepSampler
 from generative_model.config import TrainerConfig
 from uuid import uuid4
 
@@ -22,10 +22,15 @@ class Trainer():
             *,
             model: nn.Module,
             data: DataLoader,
-            diffusion_sampler: DDIMSampler | DDPMSampler,
-            timestep_sampler: TimestepSampler,
+            diffusion_sampler: DDIMSampler | DDPMSampler | FMSampler,
+            timestep_sampler: TimestepSampler | FMTimestepSampler,
             config: TrainerConfig 
     ):
+        is_fm = isinstance(diffusion_sampler, FMSampler)
+        expected_timesteps = FMTimestepSampler if is_fm else TimestepSampler
+        if not isinstance(timestep_sampler, expected_timesteps):
+            raise ValueError(f"{type(diffusion_sampler).__name__} requires {expected_timesteps.__name__}.")
+        self.training_method = 'fm' if is_fm else 'ddpm'
         self.lr = config.lr
         self.dropout = config.dropout
         self.dataloader = data
@@ -123,12 +128,20 @@ class Trainer():
             "optimizer": self.optimizer.state_dict(),
             "last_epoch": epoch,
             "wandb_runid": self.wandb_runid,
-            "global_steps": self.global_steps
+            "global_steps": self.global_steps,
+            "training_method": self.training_method,
         }, self.save_dir / filename)
 
     def load(self, path: str | Path) -> None:
         """Restore model and optimizer state dicts from a single .pt file."""
         checkpoint = th.load(path, map_location=self.device, weights_only=True)
+        # Checkpoints created before FM support contain diffusion noise predictors.
+        checkpoint_method = checkpoint.get('training_method', 'ddpm')
+        if checkpoint_method != self.training_method:
+            raise ValueError(
+                f"Checkpoint training method is {checkpoint_method!r}, "
+                f"but this trainer uses {self.training_method!r}."
+            )
         self.model.load_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.start_epoch = checkpoint['last_epoch']

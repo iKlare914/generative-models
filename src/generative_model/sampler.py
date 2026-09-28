@@ -322,3 +322,88 @@ class TimestepSampler():
         elif self.strategy == 'Loss_weighted':
             raise NotImplementedError("Loss weighted sampling is not implemented")
         return th.tensor(t, dtype=th.long, device=device), th.tensor(weights, dtype=th.float32, device=device)
+
+class FMSampler():
+    """
+    CondOT flow matching with physical time in [0, 1].
+
+    Training and sampling both pass 1000 * t to the UNet time embedding.
+    """
+    def __init__(self, step, model, device, loss_fn=th.nn.MSELoss()):
+        step = float(step)
+        if not math.isfinite(step) or not 0 < step <= 1:
+            raise ValueError("FM step must be finite and in (0, 1].")
+        self.h = step
+        self.model = model
+        self.device = th.device(device)
+        self.sample_nums = math.ceil(1 / step)
+        self.loss_fn = loss_fn
+
+    def q_sample(self, x_T: th.Tensor, t: th.Tensor) -> tuple[th.Tensor, th.Tensor]:
+        """
+        Calculate x_t = alpha_t * x_T + beta_t * z
+        Args:
+            x_T: Image tensor sampled from dataset, shape [B, C, H ,W]
+            t: time step tensor from U[0, 1), shape [B]
+        Returns:
+            x_t: Interpolated image tensor, shape [B, C, H, W]
+            noise: Standard gaussian noise added to image, shape [B, C, H, W]
+        """
+        if t.ndim != 1 or t.shape[0] != x_T.shape[0]:
+            raise ValueError("Expected one timestep per image, with shape [B].")
+        x_T = x_T.to(self.device)
+        t = t.to(self.device)
+        t = t.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+        noise = th.randn_like(x_T, device=self.device)
+        x_t = t * x_T + (1 - t) * noise
+        return x_t, noise
+
+    @th.no_grad()
+    def sample(self, x_0: th.Tensor) -> th.Tensor:
+        """
+        Euler ODE solver to sample true image from pure standard gaussian noise
+        Args:
+            x_0: Standard gaussian noise, shape [B, C, H, W]
+        Returns:
+            x_T: True image reconstructed from gaussian noise, shape [B, C, H, W]
+        """
+        x_0 = x_0.to(self.device)
+        with tqdm(range(self.sample_nums), desc="Sampling") as pbar:
+            for index in pbar:
+                # Derive time from the index to avoid accumulating rounding error.
+                t = index * self.h
+                step_size = min(self.h, 1 - t)
+                t_v = th.full((x_0.shape[0],), t, device=self.device, dtype=th.float32)
+                vf = self.model(x_0, t_v * 1000)
+                x_0 = x_0 + step_size * vf
+        return x_0
+
+    def get_loss(self, model, x_0: th.Tensor, t: th.Tensor):
+        """Regress the noise-to-data velocity x_data - noise at continuous time t."""
+        x_0 = x_0.to(self.device)
+        t = t.to(self.device)
+        x_t, noise = self.q_sample(x_0, t)
+        vf = model(x_t, t * 1000)
+        loss = self.loss_fn(vf, x_0 - noise)
+        return loss
+
+class FMTimestepSampler():
+    def __init__(self, strategy: Literal['Uniform', 'Loss_weighted']):
+        if strategy not in ['Uniform', 'Loss_weighted']:
+            raise ValueError(f"Sampling strategy must be Uniform or Loss_weighted, but got {strategy}")
+        self.strategy = strategy
+
+    def sample(self, nums, device) -> tuple[th.Tensor, th.Tensor]:
+        """
+        Sample nums timesteps from full timesteps
+        Args:
+            nums: number of timesteps needed
+            device: device that result sits on
+        Returns:
+            timesteps: Tensor [nums] sampled
+            weights: Tensor [nums] for weighted loss
+        """
+        if self.strategy == 'Uniform':
+            return th.rand((nums,), device=device, dtype=th.float32), th.ones((nums,), device=device, dtype=th.float32)
+        elif self.strategy == 'Loss_weighted':
+            raise NotImplementedError(f"{self.strategy} sampling is not implemented")
