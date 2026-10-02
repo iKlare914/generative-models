@@ -4,6 +4,7 @@ from tqdm.auto import tqdm
 from generative_model.logger import get_logger
 from typing import Literal
 import numpy as np
+from generative_model.text_encoder import CLIPTextEncoder
 
 logger = get_logger(__name__)
 
@@ -407,3 +408,234 @@ class FMTimestepSampler():
             return th.rand((nums,), device=device, dtype=th.float32), th.ones((nums,), device=device, dtype=th.float32)
         elif self.strategy == 'Loss_weighted':
             raise NotImplementedError(f"{self.strategy} sampling is not implemented")
+
+
+class CFGDDPMSampler:
+    """DDPM with cached text conditions and classifier-free guidance."""
+
+    def __init__(
+        self, model, betas, d_type=th.float32, device=device, loss_fn=None, *,
+        guidance_scale=1.0, eval_max_length=77, text_encoder: CLIPTextEncoder | None = None,
+        text_model_name="openai/clip-vit-base-patch32",
+    ):
+        self.model = model
+        self.device = th.device(device)
+        self.d_type = d_type
+        self.loss_fn = th.nn.MSELoss() if loss_fn is None else loss_fn
+        self.guidance_scale = guidance_scale
+        self.eval_max_length = eval_max_length
+        self.text_encoder = text_encoder if text_encoder is not None else CLIPTextEncoder(text_model_name)
+        self._empty_conditions: dict[int, tuple[th.Tensor, th.Tensor]] = {}
+        self.betas = to_tensor(betas, d_type, self.device)
+        self.num_timesteps = len(self.betas)
+        self.alphas = 1 - self.betas
+        self.alpha_bars = th.cumprod(self.alphas, dim=0)
+        self.alpha_bars_prev = th.cat([th.ones_like(self.alpha_bars[:1]), self.alpha_bars[:-1]])
+
+    def encode_prompts(self, prompts, *, max_length=None):
+        """Delegate prompt encoding to the supplied CLIPTextEncoder."""
+        length = self.eval_max_length if max_length is None else max_length
+        return self.text_encoder.encode_prompts(prompts, max_length=length, device=self.device)
+
+    def _empty_condition(self, max_length):
+        """Keep one empty-text feature on the sampler device for each used length."""
+        if max_length not in self._empty_conditions:
+            self._empty_conditions[max_length] = self.encode_prompts([""], max_length=max_length)
+        return self._empty_conditions[max_length]
+
+    def q_sample(self, x_0, t):
+        alpha_bar = self.alpha_bars[t].view(-1, 1, 1, 1)
+        noise = th.randn_like(x_0)
+        return alpha_bar.sqrt() * x_0 + (1 - alpha_bar).sqrt() * noise, noise
+
+    def get_loss(self, model, x_0, t, context, attention_mask):
+        """Regress noise using context and attention_mask supplied by the dataset."""
+        x_0, t = x_0.to(self.device), t.to(self.device)
+        context = context.to(device=self.device, dtype=x_0.dtype)
+        attention_mask = attention_mask.to(device=self.device, dtype=th.bool)
+        x_t, noise = self.q_sample(x_0, t)
+        prediction = model(x_t, t, context, attention_mask)
+        return self.loss_fn(prediction, noise)
+
+    def p_sample(self, x_t, t, context, attention_mask, empty, empty_mask, guidance_scale):
+        if guidance_scale == 1:
+            prediction = self.model(x_t, t, context, attention_mask)
+        elif guidance_scale == 0:
+            prediction = self.model(x_t, t, empty, empty_mask)
+        else:
+            conditional = self.model(x_t, t, context, attention_mask)
+            unconditional = self.model(x_t, t, empty, empty_mask)
+            prediction = unconditional + guidance_scale * (conditional - unconditional)
+        beta = self.betas[t].view(-1, 1, 1, 1)
+        alpha = self.alphas[t].view(-1, 1, 1, 1)
+        alpha_bar = self.alpha_bars[t].view(-1, 1, 1, 1)
+        alpha_bar_prev = self.alpha_bars_prev[t].view(-1, 1, 1, 1)
+        mean = (x_t - beta * prediction / (1 - alpha_bar).sqrt()) / alpha.sqrt()
+        std = (beta * (1 - alpha_bar_prev) / (1 - alpha_bar)).sqrt()
+        return mean + std * th.randn_like(x_t), prediction
+
+    @th.no_grad()
+    def sample(self, x_T, prompts=None, guidance_scale=None, *, context=None, attention_mask=None):
+        """Sample from prompts, or reuse supplied context and attention_mask without encoding."""
+        x_t = x_T.to(self.device)
+        if context is None:
+            prompts = [prompts] * len(x_t) if isinstance(prompts, str) else list(prompts)
+            if len(prompts) != len(x_t):
+                raise ValueError("Provide one prompt per image, or one string for the whole batch.")
+            context, attention_mask = self.encode_prompts(prompts)
+        context = context.to(device=self.device, dtype=x_t.dtype)
+        attention_mask = attention_mask.to(device=self.device, dtype=th.bool)
+        scale = self.guidance_scale if guidance_scale is None else guidance_scale
+        empty, empty_mask = (None, None)
+        if scale != 1:
+            empty, empty_mask = self._empty_condition(context.shape[1])
+            empty = empty.to(x_t.dtype).expand(len(x_t), -1, -1)
+            empty_mask = empty_mask.expand(len(x_t), -1)
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            for step in tqdm(range(self.num_timesteps - 1, -1, -1), desc="CFG sampling"):
+                t = th.full((len(x_t),), step, dtype=th.long, device=self.device)
+                x_t, _ = self.p_sample(x_t, t, context, attention_mask, empty, empty_mask, scale)
+        finally:
+            self.model.train(was_training)
+        return x_t
+
+
+class CFGDDIMSampler(CFGDDPMSampler):
+    """DDIM with inherited text encoding and sampling, plus its own reverse update."""
+
+    def __init__(
+        self, model, spacing, randomness=0.0, betas=None, d_type=th.float32,
+        device=device, loss_fn=None, *, guidance_scale=1.0, eval_max_length=77,
+        text_encoder: CLIPTextEncoder | None = None,
+        text_model_name="openai/clip-vit-base-patch32",
+    ):
+        super().__init__(
+            model, betas, d_type=d_type, device=device, loss_fn=loss_fn,
+            guidance_scale=guidance_scale, eval_max_length=eval_max_length, text_encoder=text_encoder,
+            text_model_name=text_model_name,
+        )
+        self.spacing = spacing
+        self.randomness = min(max(float(randomness), 0.0), 1.0)
+        self.ddim_timesteps = th.arange(0, self.num_timesteps, spacing, device=self.device)
+        if self.ddim_timesteps[-1] != self.num_timesteps - 1:
+            self.ddim_timesteps = th.cat([
+                self.ddim_timesteps, self.ddim_timesteps.new_tensor([self.num_timesteps - 1]),
+            ])
+        self.alpha_bars = self.alpha_bars[self.ddim_timesteps]
+        self.alpha_bars_prev = th.cat([th.ones_like(self.alpha_bars[:1]), self.alpha_bars[:-1]])
+        self.alphas = self.alpha_bars / self.alpha_bars_prev
+        self.betas = 1 - self.alphas
+        self.num_timesteps = len(self.ddim_timesteps)
+        self.sigmas = self.randomness * (self.betas * (1 - self.alpha_bars_prev) / (1 - self.alpha_bars)).sqrt()
+
+    def get_loss(self, model, x_0, t, context, attention_mask):
+        """Regress noise; t indexes the reduced DDIM schedule."""
+        x_0, t = x_0.to(self.device), t.to(self.device)
+        context = context.to(device=self.device, dtype=x_0.dtype)
+        attention_mask = attention_mask.to(device=self.device, dtype=th.bool)
+        x_t, noise = self.q_sample(x_0, t)
+        prediction = model(x_t, self.ddim_timesteps[t], context, attention_mask)
+        return self.loss_fn(prediction, noise)
+
+    def p_sample(self, x_t, t, context, attention_mask, empty, empty_mask, guidance_scale):
+        model_t = self.ddim_timesteps[t]
+        if guidance_scale == 1:
+            prediction = self.model(x_t, model_t, context, attention_mask)
+        elif guidance_scale == 0:
+            prediction = self.model(x_t, model_t, empty, empty_mask)
+        else:
+            conditional = self.model(x_t, model_t, context, attention_mask)
+            unconditional = self.model(x_t, model_t, empty, empty_mask)
+            prediction = unconditional + guidance_scale * (conditional - unconditional)
+        alpha = self.alphas[t].view(-1, 1, 1, 1)
+        alpha_bar = self.alpha_bars[t].view(-1, 1, 1, 1)
+        alpha_bar_prev = self.alpha_bars_prev[t].view(-1, 1, 1, 1)
+        sigma = self.sigmas[t].view(-1, 1, 1, 1)
+        mean = (x_t - (1 - alpha_bar).sqrt() * prediction) / alpha.sqrt()
+        mean = mean + (1 - alpha_bar_prev - sigma.square()).clamp_min(0).sqrt() * prediction
+        return mean + sigma * th.randn_like(x_t), prediction
+
+
+class CFGFMSampler:
+    """Flow matching with cached text conditions and guided Euler sampling."""
+
+    def __init__(
+        self, step, model, device, loss_fn=None, *, guidance_scale=1.0, eval_max_length=77,
+        text_encoder: CLIPTextEncoder | None = None,
+        text_model_name="openai/clip-vit-base-patch32",
+    ):
+        self.h = float(step)
+        if not 0 < self.h <= 1:
+            raise ValueError("FM step must be in (0, 1].")
+        self.sample_nums = math.ceil(1 / self.h)
+        self.model = model
+        self.device = th.device(device)
+        self.loss_fn = th.nn.MSELoss() if loss_fn is None else loss_fn
+        self.guidance_scale = guidance_scale
+        self.eval_max_length = eval_max_length
+        self.text_encoder = text_encoder if text_encoder is not None else CLIPTextEncoder(text_model_name)
+        self._empty_conditions: dict[int, tuple[th.Tensor, th.Tensor]] = {}
+
+    def encode_prompts(self, prompts, *, max_length=None):
+        """Delegate prompt encoding to the supplied CLIPTextEncoder."""
+        length = self.eval_max_length if max_length is None else max_length
+        return self.text_encoder.encode_prompts(prompts, max_length=length, device=self.device)
+
+    def _empty_condition(self, max_length):
+        """Keep one empty-text feature on the sampler device for each used length."""
+        if max_length not in self._empty_conditions:
+            self._empty_conditions[max_length] = self.encode_prompts([""], max_length=max_length)
+        return self._empty_conditions[max_length]
+
+    def q_sample(self, x_0, t):
+        t = t.view(-1, 1, 1, 1)
+        noise = th.randn_like(x_0)
+        return t * x_0 + (1 - t) * noise, noise
+
+    def get_loss(self, model, x_0, t, context, attention_mask):
+        """Regress image - noise using supplied text features and model time 1000 * t."""
+        x_0, t = x_0.to(self.device), t.to(self.device)
+        context = context.to(device=self.device, dtype=x_0.dtype)
+        attention_mask = attention_mask.to(device=self.device, dtype=th.bool)
+        x_t, noise = self.q_sample(x_0, t)
+        prediction = model(x_t, t * 1000, context, attention_mask)
+        return self.loss_fn(prediction, x_0 - noise)
+
+    @th.no_grad()
+    def sample(self, x_0, prompts=None, guidance_scale=None, *, context=None, attention_mask=None):
+        """Integrate CFG velocities using prompts or precomputed context and attention_mask."""
+        x_t = x_0.to(self.device)
+        if context is None:
+            prompts = [prompts] * len(x_t) if isinstance(prompts, str) else list(prompts)
+            if len(prompts) != len(x_t):
+                raise ValueError("Provide one prompt per image, or one string for the whole batch.")
+            context, attention_mask = self.encode_prompts(prompts)
+        context = context.to(device=self.device, dtype=x_t.dtype)
+        attention_mask = attention_mask.to(device=self.device, dtype=th.bool)
+        scale = self.guidance_scale if guidance_scale is None else guidance_scale
+        empty, empty_mask = (None, None)
+        if scale != 1:
+            empty, empty_mask = self._empty_condition(context.shape[1])
+            empty = empty.to(x_t.dtype).expand(len(x_t), -1, -1)
+            empty_mask = empty_mask.expand(len(x_t), -1)
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            for index in tqdm(range(self.sample_nums), desc="CFG sampling"):
+                t = index * self.h
+                step_size = min(self.h, 1 - t)
+                model_t = th.full((len(x_t),), t * 1000, dtype=th.float32, device=self.device)
+                if scale == 1:
+                    velocity = self.model(x_t, model_t, context, attention_mask)
+                elif scale == 0:
+                    velocity = self.model(x_t, model_t, empty, empty_mask)
+                else:
+                    conditional = self.model(x_t, model_t, context, attention_mask)
+                    unconditional = self.model(x_t, model_t, empty, empty_mask)
+                    velocity = unconditional + scale * (conditional - unconditional)
+                x_t = x_t + step_size * velocity
+        finally:
+            self.model.train(was_training)
+        return x_t

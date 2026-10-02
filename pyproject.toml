@@ -21,6 +21,12 @@ dependencies = [
 [project.scripts]
  generative-model = "generative_model:main"
 
+[project.optional-dependencies]
+clip-cfg = [
+    "matplotlib>=3.11.2",
+    "transformers>=5.18.0",
+]
+
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
 build-backend = "uv_build"
