@@ -20,6 +20,7 @@ class TrainerConfig(StrictModel, frozen=True):
             Defaults to False.
         guided: Whether to use guided diffusion
         log_samples: Whether to log samples result every save interval epoches
+        use_torch_compile: Whether to compile the training model. Defaults to False.
         save_dir: Directory in which to save training checkpoints.
     """
 
@@ -32,5 +33,6 @@ class TrainerConfig(StrictModel, frozen=True):
     resume: bool = False
     guided: bool = False
     log_samples: bool = False
+    use_torch_compile: bool = False
     save_dir: Path
     image_size: PositiveInt = 32

@@ -29,13 +29,14 @@ class CifarDataset(Dataset):
         img = img / 127.5 - 1 # convert to [-1, 1]
         return img
 
-def getCifarLoader(repo_name, split, batch_size=8, shuffle=True, num_workers=4, image_size=None, cache_dir=None):
+def getCifarLoader(repo_name, split, batch_size=8, shuffle=True, num_workers=4, image_size=None, cache_dir=None, drop_last=True):
     dataset = CifarDataset(repo_name, split, shuffle, image_size=image_size, cache_dir=cache_dir)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
+        drop_last=drop_last
     )
     return loader
 

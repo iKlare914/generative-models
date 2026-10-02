@@ -49,6 +49,8 @@ class Trainer():
         self.model = model
         self.device = next(model.parameters()).device
         self.diffusion_sampler = diffusion_sampler
+        if config.use_torch_compile:
+            self.model = th.compile(model, fullgraph=True)
         self.timestep_sampler = timestep_sampler
         self.optimizer = AdamW(model.parameters(), lr=self.lr, weight_decay=self.weight_decay) 
         self.optimizer.zero_grad()
@@ -58,7 +60,7 @@ class Trainer():
 
         if self.log_samples_enabled:
             generator = th.Generator().manual_seed(114514)
-            self.fixed_noise = th.randn((8, 3, self.image_size, self.image_size), generator=generator).to(self.device)
+            self.fixed_noise = th.randn((9, 3, self.image_size, self.image_size), generator=generator).to(self.device)
 
     def train(self):
         self.resume() # resume checkpoint if resume enabled

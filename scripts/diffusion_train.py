@@ -50,6 +50,7 @@ def parse_args(argv=None):
     parser.add_argument('--save-dir', type=Path, default=Path('checkpoints/cifar10'))
     parser.add_argument('--save-interval-epoch', type=positive_int, default=10)
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--use-torch-compile', action='store_true', help='Compile the training model with torch.compile')
     parser.add_argument('--log-samples', action='store_true', help='Generate eight images whenever a checkpoint is saved')
     parser.add_argument('--device', default='cuda', help='Torch device, e.g. cuda, cuda:0, or cpu; never silently falls back')
     parser.add_argument('--seed', type=int, default=42)
@@ -108,6 +109,7 @@ def main(argv=None):
         weight_decay=args.weight_decay, epoches=args.epochs,
         save_interval_epoch=args.save_interval_epoch, resume=args.resume,
         log_samples=args.log_samples, save_dir=args.save_dir,
+        use_torch_compile=args.use_torch_compile,
         image_size=args.image_size,
     )
     model = UNet(
