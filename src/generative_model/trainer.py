@@ -23,6 +23,10 @@ class BaseTrainer(ABC):
     def __init__(self, *, model, optimizer, save_dir, training_method, resume=False):
         self.model = model
         self.device = next(model.parameters()).device
+        self.use_bf16_autocast = False
+        if self.device.type == "cuda" and th.cuda.is_available():
+            with th.cuda.device(self.device):
+                self.use_bf16_autocast = th.cuda.is_bf16_supported(including_emulation=False)
         self.optimizer = optimizer
         self.save_dir = Path(save_dir) if save_dir is not None else None
         if self.save_dir is not None:
@@ -174,7 +178,8 @@ class Trainer(BaseTrainer):
                         self.optimizer.zero_grad()
                         # weight currentlty unused
                         t, weights = self.timestep_sampler.sample(batch_img.shape[0], self.device)
-                        loss = self.diffusion_sampler.get_loss(self.model, batch_img, t)
+                        with th.autocast(device_type="cuda", dtype=th.bfloat16, enabled=self.use_bf16_autocast):
+                            loss = self.diffusion_sampler.get_loss(self.model, batch_img, t)
                         loss.backward()
                         total_loss += loss.item()
                         grad_norm = self.get_grad_norm()
@@ -285,9 +290,10 @@ class CFGTrainer(BaseTrainer):
                         self.optimizer.zero_grad()
                         # weight currentlty unused
                         t, weights = self.timestep_sampler.sample(batch_img.shape[0], self.device)
-                        loss = self.diffusion_sampler.get_loss(
-                            self.model, batch_img, t, context=context, attention_mask=attention_mask,
-                        )
+                        with th.autocast(device_type="cuda", dtype=th.bfloat16, enabled=self.use_bf16_autocast):
+                            loss = self.diffusion_sampler.get_loss(
+                                self.model, batch_img, t, context=context, attention_mask=attention_mask,
+                            )
                         loss.backward()
                         total_loss += loss.item()
                         grad_norm = self.get_grad_norm()
