@@ -45,7 +45,8 @@ def parse_args(argv=None):
     parser.add_argument('--num-heads', type=positive_int, default=4)
     parser.add_argument('--method', choices=['ddpm', 'fm'], default='ddpm')
     parser.add_argument('--timesteps', type=positive_int, default=1000, help='DDPM only: diffusion schedule length')
-    parser.add_argument('--fm-step', type=float, default=0.01, help='FM only: Euler step size in (0, 1] for logged samples; does not discretize training time')
+    parser.add_argument('--fm-step', type=float, default=0.01, help='FM only: integration step size in (0, 1] for logged samples; does not discretize training time')
+    parser.add_argument('--solver', choices=['euler'], default='euler', help='FM only: solver (currently only euler is supported)')
     parser.add_argument('--dataset', default='uoft-cs/cifar10', help='Hugging Face CIFAR-format dataset repository')
     parser.add_argument('--text-model-name', default='openai/clip-vit-base-patch32', help='CLIP model ID or local directory; always encoded on CPU')
     parser.add_argument('--label-drop-rate', type=float, default=0.2, help='Probability of using empty-text conditioning in the dataset')
@@ -136,7 +137,7 @@ def main(argv=None):
     ).to(device)
     if args.method == 'fm':
         sampler = CFGFMSampler(
-            args.fm_step, model, device=device, text_encoder=encoder,
+            args.fm_step, model, device=device, text_encoder=encoder, solver=args.solver,
             guidance_scale=args.guidance_scale, eval_max_length=args.eval_max_length,
         )
         timestep_sampler = FMTimestepSampler('Uniform')

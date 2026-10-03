@@ -42,9 +42,10 @@ def parse_args(argv=None):
     parser.add_argument('--num-heads', type=positive_int, default=4)
     parser.add_argument('--sample', choices=['ddpm', 'ddim', 'fm'], default='ddim')
     parser.add_argument('--fm-step', type=float, default=0.01)
+    parser.add_argument('--solver', choices=['euler'], default='euler', help='FM only: solver (currently only euler is supported)')
     parser.add_argument('--timesteps', type=positive_int, default=1000, help='DDPM/DDIM: schedule length used in training')
     parser.add_argument('--timestep-spacing', type=positive_int, default=20, help='DDIM timestep stride')
-    parser.add_argument('--randomness', type=float, default=0.0, help='DDIM noise strength (eta) in [0, 1]')
+    parser.add_argument('--randomness', type=float, default=0.0, help='Noise strength in [0, 1]: DDIM eta; FM sigma(t) = randomness * sqrt(1-t)')
     parser.add_argument('--guidance-scale', type=float, default=3.0, help='CFG weight for the first nine samples; bottom row always uses 0')
     parser.add_argument('--eval-max-length', type=positive_int, default=77)
     parser.add_argument('--text-model-name', default='openai/clip-vit-base-patch32', help='CLIP model ID or local directory; CLIP runs on CPU')
@@ -68,8 +69,10 @@ def parse_args(argv=None):
         parser.error('model channels must be divisible by --num-heads')
     if args.embedding_channels % 2:
         parser.error('--embedding-channels must be even')
-    if not 0 <= args.dropout <= 1 or not 0 <= args.randomness <= 1:
-        parser.error('--dropout and --randomness must be between 0 and 1')
+    if not 0 <= args.dropout <= 1:
+        parser.error('--dropout must be between 0 and 1')
+    if not math.isfinite(args.randomness) or not 0 <= args.randomness <= 1:
+        parser.error('--randomness must be finite and between 0 and 1')
     if args.sample != 'fm' and args.timesteps <= 50:
         parser.error('--timesteps must exceed 50 for this beta schedule')
     if args.sample == 'fm' and (not math.isfinite(args.fm_step) or not 0 < args.fm_step <= 1):
@@ -81,13 +84,17 @@ def parse_args(argv=None):
     return args
 
 
-def make_figure(samples, prompts, *, sample_method, guidance_scale, random_init=False):
+def make_figure(samples, prompts, *, sample_method, guidance_scale, random_init=False, solver=None, randomness=0.0):
     """Draw twelve separate image axes, each with its own prompt title."""
     import matplotlib.pyplot as plt
 
     pixels = display_image_uint8(samples).permute(0, 2, 3, 1).numpy()
     figure, axes = plt.subplots(4, 3, figsize=(10.5, 13), layout='constrained')
     title = f'{sample_method.upper()} | CFG scale {guidance_scale:g}'
+    if sample_method == 'fm' and solver is not None:
+        title += f' | {solver.upper()}'
+    if sample_method in ('fm', 'ddim'):
+        title += f' | randomness {randomness:g}'
     if random_init:
         title += ' | Untrained model'
     figure.suptitle(title, fontsize=15)
@@ -136,8 +143,9 @@ def main(argv=None):
     options = dict(device=device, text_encoder=encoder, guidance_scale=args.guidance_scale,
                    eval_max_length=args.eval_max_length)
     if args.sample == 'fm':
-        sampler = CFGFMSampler(args.fm_step, model, **options)
+        sampler = CFGFMSampler(args.fm_step, model, solver=args.solver, randomness=args.randomness, **options)
         num_steps = sampler.sample_nums
+        print(f'FM solver: {args.solver}, randomness: {args.randomness:g}', flush=True)
     elif args.sample == 'ddim':
         sampler = CFGDDIMSampler(model, spacing=args.timestep_spacing, randomness=args.randomness,
                                  betas=make_beta_schedule(args.timesteps), **options)
@@ -157,7 +165,8 @@ def main(argv=None):
     if not torch.isfinite(samples).all():
         raise RuntimeError('Sampling produced non-finite values; check the checkpoint and schedule.')
     figure = make_figure(samples, prompts, sample_method=args.sample,
-                         guidance_scale=args.guidance_scale, random_init=args.random_init)
+                         guidance_scale=args.guidance_scale, random_init=args.random_init,
+                         solver=args.solver, randomness=args.randomness)
     if args.output_path is not None:
         figure.savefig(args.output_path, dpi=160)
         print(f'Saved samples to {args.output_path.resolve()}', flush=True)

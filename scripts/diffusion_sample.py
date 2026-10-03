@@ -38,10 +38,11 @@ def parse_args(argv=None):
     parser.add_argument('--attention-resolutions', type=positive_int, nargs='*', default=[16, 8], help='Feature-map side lengths, as in training; empty disables encoder/decoder attention')
     parser.add_argument('--num-heads', type=positive_int, default=4)
     parser.add_argument('--sample', choices=['ddpm', 'ddim', 'fm'], default='ddpm')
-    parser.add_argument('--fm-step', type=float, default=0.01, help='FM only: Euler step size in (0, 1]')
+    parser.add_argument('--fm-step', type=float, default=0.01, help='FM only: integration step size in (0, 1]')
+    parser.add_argument('--solver', choices=['euler'], default='euler', help='FM only: solver (currently only euler is supported)')
     parser.add_argument('--timesteps', type=positive_int, default=1000, help='DDPM/DDIM only: original diffusion schedule length; must match training')
     parser.add_argument('--timestep-spacing', type=positive_int, default=20, help='DDIM only: stride through the original timesteps; the sampler also includes the last timestep')
-    parser.add_argument('--randomness', type=float, default=0.0, help='DDIM only: noise strength (eta), from 0 to 1')
+    parser.add_argument('--randomness', type=float, default=0.0, help='Noise strength in [0, 1]: DDIM eta; FM sigma(t) = randomness * sqrt(1-t)')
     parser.add_argument('--device', default='cpu', help='Torch device, e.g. cpu, mps, or cuda; never silently falls back')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args(argv)
@@ -73,7 +74,7 @@ def parse_args(argv=None):
         parser.error('--timesteps must exceed 50 for this beta schedule')
     if args.sample == 'fm' and (not math.isfinite(args.fm_step) or not 0 < args.fm_step <= 1):
         parser.error('--fm-step must be finite and in (0, 1]')
-    if not 0 <= args.randomness <= 1:
+    if not math.isfinite(args.randomness) or not 0 <= args.randomness <= 1:
         parser.error('--randomness must be finite and between 0 and 1')
     return args
 
@@ -121,8 +122,9 @@ def main(argv=None):
     model.to(device).eval()
 
     if args.sample == 'fm':
-        sampler = FMSampler(args.fm_step, model, device=device)
+        sampler = FMSampler(args.fm_step, model, device=device, solver=args.solver, randomness=args.randomness)
         num_steps = sampler.sample_nums
+        print(f'FM solver: {args.solver}, randomness: {args.randomness:g}', flush=True)
     else:
         betas = make_beta_schedule(args.timesteps)
         if args.sample == 'ddim':

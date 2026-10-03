@@ -324,16 +324,35 @@ class TimestepSampler():
             raise NotImplementedError("Loss weighted sampling is not implemented")
         return th.tensor(t, dtype=th.long, device=device), th.tensor(weights, dtype=th.float32, device=device)
 
+def _step(velocity, x, t, h, solver, randomness=0.0):
+    """Advance a physical-time velocity field; add new solver branches here."""
+    if solver == 'euler':
+        if randomness > 0:
+            vf = velocity(x, t)
+            noise = th.randn_like(x)
+            drift = h * ((1 + t * math.pow(randomness, 2) / 2) * vf - x * (math.pow(randomness, 2) / 2))
+            diffusion = noise * math.sqrt(1 - t) * randomness * math.sqrt(h)
+            return x + drift + diffusion
+        else:
+            return x + h * velocity(x, t)
+    raise ValueError(f"Unsupported solver {solver!r}; only 'euler' is supported.")
+
+
 class FMSampler():
     """
     CondOT flow matching with physical time in [0, 1].
 
     Training and sampling both pass 1000 * t to the UNet time embedding.
+    solver currently supports only Euler, which is the default.
     """
-    def __init__(self, step, model, device, loss_fn=th.nn.MSELoss()):
+    def __init__(self, step, model, device, randomness = 0.0, loss_fn = th.nn.MSELoss(), *, solver: Literal['euler'] = 'euler'):
         step = float(step)
         if not math.isfinite(step) or not 0 < step <= 1:
             raise ValueError("FM step must be finite and in (0, 1].")
+        if solver != 'euler':
+            raise ValueError("solver must be 'euler'.")
+        self.solver = solver
+        self.randomness = float(randomness)
         self.h = step
         self.model = model
         self.device = th.device(device)
@@ -362,21 +381,24 @@ class FMSampler():
     @th.no_grad()
     def sample(self, x_0: th.Tensor) -> th.Tensor:
         """
-        Euler ODE solver to sample true image from pure standard gaussian noise
+        Integrate from Gaussian noise using the configured solver (Euler).
         Args:
             x_0: Standard gaussian noise, shape [B, C, H, W]
         Returns:
             x_T: True image reconstructed from gaussian noise, shape [B, C, H, W]
         """
         x_0 = x_0.to(self.device)
+
+        def velocity(x, t):
+            t_v = th.full((x.shape[0],), t, device=self.device, dtype=th.float32)
+            return self.model(x, t_v * 1000)
+
         with tqdm(range(self.sample_nums), desc="Sampling") as pbar:
             for index in pbar:
                 # Derive time from the index to avoid accumulating rounding error.
                 t = index * self.h
                 step_size = min(self.h, 1 - t)
-                t_v = th.full((x_0.shape[0],), t, device=self.device, dtype=th.float32)
-                vf = self.model(x_0, t_v * 1000)
-                x_0 = x_0 + step_size * vf
+                x_0 = _step(velocity, x_0, t, step_size, self.solver, self.randomness)
         return x_0
 
     def get_loss(self, model, x_0: th.Tensor, t: th.Tensor):
@@ -562,13 +584,18 @@ class CFGFMSampler:
     """Flow matching with cached text conditions and guided Euler sampling."""
 
     def __init__(
-        self, step, model, device, loss_fn=None, *, guidance_scale=1.0, eval_max_length=77,
+        self, step, model, device, randomness=0.0, loss_fn=th.nn.MSELoss(), *, guidance_scale=1.0, eval_max_length=77,
         text_encoder: CLIPTextEncoder | None = None,
         text_model_name="openai/clip-vit-base-patch32",
+        solver: Literal['euler'] = 'euler',
     ):
         self.h = float(step)
+        self.randomness = float(randomness)
         if not 0 < self.h <= 1:
             raise ValueError("FM step must be in (0, 1].")
+        if solver != 'euler':
+            raise ValueError("solver must be 'euler'.")
+        self.solver = solver
         self.sample_nums = math.ceil(1 / self.h)
         self.model = model
         self.device = th.device(device)
@@ -622,20 +649,22 @@ class CFGFMSampler:
             empty_mask = empty_mask.expand(len(x_t), -1)
         was_training = self.model.training
         self.model.eval()
+
+        def velocity(x, t):
+            model_t = th.full((len(x),), t * 1000, dtype=th.float32, device=self.device)
+            if scale == 1:
+                return self.model(x, model_t, context, attention_mask)
+            if scale == 0:
+                return self.model(x, model_t, empty, empty_mask)
+            conditional = self.model(x, model_t, context, attention_mask)
+            unconditional = self.model(x, model_t, empty, empty_mask)
+            return unconditional + scale * (conditional - unconditional)
+
         try:
             for index in tqdm(range(self.sample_nums), desc="CFG sampling"):
                 t = index * self.h
                 step_size = min(self.h, 1 - t)
-                model_t = th.full((len(x_t),), t * 1000, dtype=th.float32, device=self.device)
-                if scale == 1:
-                    velocity = self.model(x_t, model_t, context, attention_mask)
-                elif scale == 0:
-                    velocity = self.model(x_t, model_t, empty, empty_mask)
-                else:
-                    conditional = self.model(x_t, model_t, context, attention_mask)
-                    unconditional = self.model(x_t, model_t, empty, empty_mask)
-                    velocity = unconditional + scale * (conditional - unconditional)
-                x_t = x_t + step_size * velocity
+                x_t = _step(velocity, x_t, t, step_size, self.solver, self.randomness)
         finally:
             self.model.train(was_training)
         return x_t

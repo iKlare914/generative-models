@@ -43,7 +43,8 @@ def parse_args(argv=None):
     parser.add_argument('--num-heads', type=positive_int, default=4)
     parser.add_argument('--method', choices=['ddpm', 'fm'], default='ddpm')
     parser.add_argument('--timesteps', type=positive_int, default=1000, help='DDPM only: diffusion schedule length')
-    parser.add_argument('--fm-step', type=float, default=0.01, help='FM only: Euler step size in (0, 1] for logged samples; does not discretize training time')
+    parser.add_argument('--fm-step', type=float, default=0.01, help='FM only: integration step size in (0, 1] for logged samples; does not discretize training time')
+    parser.add_argument('--solver', choices=['euler'], default='euler', help='FM only: solver (currently only euler is supported)')
     parser.add_argument('--dataset', default='uoft-cs/cifar10', help='Hugging Face CIFAR-format dataset repository')
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--cache-dir', type=Path, default=Path('.cache/huggingface/datasets'))
@@ -120,7 +121,7 @@ def main(argv=None):
         num_heads=args.num_heads, image_size=args.image_size,
     ).to(device)
     if args.method == 'fm':
-        sampler = FMSampler(args.fm_step, model, device=device)
+        sampler = FMSampler(args.fm_step, model, device=device, solver=args.solver)
         timestep_sampler = FMTimestepSampler('Uniform')
     else:
         sampler = DDPMSampler(model, betas=make_beta_schedule(args.timesteps), device=device)
