@@ -76,7 +76,7 @@ class BaseTrainer(ABC):
 
     def load(self, path: str | Path) -> None:
         """Restore model and optimizer state dicts from a single .pt file."""
-        checkpoint = th.load(path, map_location=self.device, weights_only=True)
+        checkpoint = th.load(path, map_location='cpu', weights_only=True)
         # Checkpoints created before FM support contain diffusion noise predictors.
         checkpoint_method = checkpoint.get('training_method', 'ddpm')
         if checkpoint_method != self.training_method:
