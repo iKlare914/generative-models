@@ -108,11 +108,14 @@ class BaseTrainer(ABC):
         """Average parameters after an optimizer step and copy model buffers."""
         if not self.use_ema:
             return
-        for ema_param, param in zip(self.ema_model.parameters(), self.model.parameters(), strict=True):
-            ema_param.lerp_(param, 1 - self.ema_decay)
+        ema_parameters = list(self.ema_model.parameters())
+        model_parameters = list(self.model.parameters())
+        th._foreach_lerp_(ema_parameters, model_parameters, 1 - self.ema_decay)
+
         # Buffers include running statistics and integer counters, not optimized weights.
-        for ema_buffer, buffer in zip(self.ema_model.buffers(), self.model.buffers(), strict=True):
-            ema_buffer.copy_(buffer)
+        # Only BatchNorm need this
+        # for ema_buffer, buffer in zip(self.ema_model.buffers(), self.model.buffers(), strict=True):
+        #     ema_buffer.copy_(buffer)
 
     def get_grad_norm(self) -> float:
         """Return the L2 norm of all gradients flattened into one vector.
