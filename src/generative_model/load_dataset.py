@@ -78,14 +78,15 @@ class CifarCLIPDataset(CifarDataset):
         prompt = np.random.choice(self.prompt_template).format(text)
         return prompt
 
-def getCifarLoader(repo_name, split, batch_size=8, shuffle=True, num_workers=4, image_size=None, cache_dir=None, drop_last=True):
+def getCifarLoader(repo_name, split, batch_size=8, shuffle=True, num_workers=8, image_size=None, cache_dir=None, drop_last=True):
     dataset = CifarDataset(repo_name, split, image_size=image_size, cache_dir=cache_dir)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        drop_last=drop_last
+        drop_last=drop_last,
+        pin_memory=True
     )
     return loader
 

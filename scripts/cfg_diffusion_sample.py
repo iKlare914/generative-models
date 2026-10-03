@@ -28,7 +28,7 @@ def positive_int(value):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     weights = parser.add_mutually_exclusive_group(required=True)
-    weights.add_argument('--model-path', type=Path, help='CFG training checkpoint')
+    weights.add_argument('--model-path', type=Path, help='CFG training checkpoint; load ema_model weights when available, otherwise model')
     weights.add_argument('--random-init', action='store_true', help='Use an untrained model for a smoke test')
     parser.add_argument('--output-path', type=Path, help='Save the titled figure instead of opening an interactive window')
     parser.add_argument('--image-size', type=positive_int, required=True)
@@ -128,13 +128,17 @@ def main(argv=None):
     )
     if args.model_path is not None:
         checkpoint = torch.load(args.model_path, map_location='cpu', weights_only=True)
+        if not isinstance(checkpoint, dict) or not any(key in checkpoint for key in ('ema_model', 'model')):
+            raise ValueError('Checkpoint must contain an ema_model or model key holding the CFGUNet state dict.')
         expected_method = 'fm' if args.sample == 'fm' else 'ddpm'
         if checkpoint.get('training_method', 'ddpm') != expected_method:
             raise ValueError(f'Checkpoint training method does not match --sample {args.sample}.')
+        weights_key = 'ema_model' if 'ema_model' in checkpoint else 'model'
+        state = checkpoint[weights_key]
         # torch.compile adds this prefix to training state dicts.
-        state = checkpoint['model']
         torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(state, '_orig_mod.')
         model.load_state_dict(state)
+        print(f'Loaded {weights_key} weights from {args.model_path}', flush=True)
         del checkpoint, state
     else:
         print('Using an untrained model: this checks execution and layout, not image quality.', flush=True)

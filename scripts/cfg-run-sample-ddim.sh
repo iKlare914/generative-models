@@ -18,9 +18,9 @@ uv run --no-sync --project "$SCRIPT_DIR/.." python "$SCRIPT_DIR/cfg_diffusion_sa
   --seed 114514 \
   --channel-mult 1 2 4 \
   --sample ddim \
-  --timestep-spacing 20 \
+  --timestep-spacing 10 \
   --randomness 0.0 \
   --feature-channels 512 \
-  --guidance-scale 3.0 \
+  --guidance-scale 4.0 \
   --eval-max-length 77 \
   "$@"

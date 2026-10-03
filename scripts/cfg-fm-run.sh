@@ -3,9 +3,11 @@ set -euo pipefail
 
 # CFG entry point. Additional CLI arguments override defaults below.
 # Install optional dependencies once: uv sync --extra clip-cfg
+# EMA is enabled by default; pass --ema-decay VALUE or --no-use-ema.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 uv run --no-sync --project "$SCRIPT_DIR/.." python "$SCRIPT_DIR/cfg_diffusion_train.py" \
+  --use-ema \
   --method fm \
   --use-torch-compile \
   --lr 0.0002 \
@@ -17,7 +19,7 @@ uv run --no-sync --project "$SCRIPT_DIR/.." python "$SCRIPT_DIR/cfg_diffusion_tr
   --attention-resolutions 16 8 \
   --device cuda \
   --res-blocks 3 \
-  --num-heads 4 \
+  --num-heads 8 \
   --log-samples \
   --model-channels 128 \
   --embedding-channels 512 \

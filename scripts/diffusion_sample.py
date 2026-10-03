@@ -27,7 +27,7 @@ def positive_int(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--model-path', type=Path, required=True, help='Training checkpoint containing the model state dict under the model key')
+    parser.add_argument('--model-path', type=Path, required=True, help='Training checkpoint; load ema_model weights when available, otherwise model')
     parser.add_argument('--output-path', type=Path, help='Save the 3x3 grid to this image file (e.g. samples.png) instead of opening a viewer; omitted means no output is saved')
     parser.add_argument('--image-size', type=positive_int, required=True, help='Square image side length used during training')
     parser.add_argument('--model-channels', type=positive_int, default=64)
@@ -108,8 +108,8 @@ def main(argv=None):
         num_heads=args.num_heads, image_size=args.image_size,
     )
     checkpoint = torch.load(args.model_path, map_location='cpu', weights_only=True)
-    if not isinstance(checkpoint, dict) or 'model' not in checkpoint:
-        raise ValueError('Checkpoint must contain a model key holding the UNet state dict.')
+    if not isinstance(checkpoint, dict) or not any(key in checkpoint for key in ('ema_model', 'model')):
+        raise ValueError('Checkpoint must contain an ema_model or model key holding the UNet state dict.')
     checkpoint_method = checkpoint.get('training_method', 'ddpm')
     expected_method = 'fm' if args.sample == 'fm' else 'ddpm'
     if checkpoint_method != expected_method:
@@ -117,8 +117,13 @@ def main(argv=None):
             f'Checkpoint training method is {checkpoint_method!r}, '
             f'which is incompatible with --sample {args.sample}.'
         )
-    model.load_state_dict(checkpoint['model'])
-    del checkpoint
+    weights_key = 'ema_model' if 'ema_model' in checkpoint else 'model'
+    state = checkpoint[weights_key]
+    # torch.compile adds this prefix to training state dicts.
+    torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(state, '_orig_mod.')
+    model.load_state_dict(state)
+    print(f'Loaded {weights_key} weights from {args.model_path}', flush=True)
+    del checkpoint, state
     model.to(device).eval()
 
     if args.sample == 'fm':

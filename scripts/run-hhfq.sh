@@ -3,9 +3,11 @@ set -euo pipefail
 
 # Run from any directory using the existing project environment.
 # Additional CLI arguments override the defaults below.
+# EMA is enabled by default; pass --ema-decay VALUE or --no-use-ema.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 uv run --no-sync --project "$SCRIPT_DIR/.." python "$SCRIPT_DIR/diffusion_train.py" \
+  --use-ema \
   --dataset "marcosv/ffhq-dataset" \
   --image-size 1024 \
   --epochs 8 \

@@ -1,7 +1,7 @@
 """Train a classifier-free guidance DDPM or flow matching model on CIFAR-10.
 
 Example:
-    python scripts/cfg_diffusion_train.py --image-size 32 --epochs 1 --device cuda
+    python scripts/cfg_diffusion_train.py --image-size 32 --epochs 1 --device cuda --ema-decay 0.9999
 """
 
 import argparse
@@ -58,12 +58,18 @@ def parse_args(argv=None):
     parser.add_argument('--save-dir', type=Path, default=Path('checkpoints/cifar10-cfg'))
     parser.add_argument('--save-interval-epoch', type=positive_int, default=10)
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--use-ema', action=argparse.BooleanOptionalAction, default=True, help='Maintain EMA model weights')
+    parser.add_argument('--ema-decay', type=float, help='EMA decay in [0, 1); required when EMA is enabled')
     parser.add_argument('--use-torch-compile', action='store_true', help='Compile the training model with torch.compile')
     parser.add_argument('--log-samples', action='store_true', help='Generate nine prompt-captioned images whenever a checkpoint is saved')
     parser.add_argument('--device', default='cuda', help='Torch device, e.g. cuda, cuda:0, or cpu; never silently falls back')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--wandb-mode', choices=['online', 'offline', 'disabled'], default='online')
     args = parser.parse_args(argv)
+    if args.use_ema and args.ema_decay is None:
+        parser.error('--ema-decay is required when EMA is enabled; use --no-use-ema to disable it')
+    if args.ema_decay is not None and not 0 <= args.ema_decay < 1:
+        parser.error('--ema-decay must be finite and in [0, 1)')
     max_scale = 2 ** (len(args.channel_mult) - 1)
     if args.image_size % max_scale:
         parser.error(f'--image-size must be divisible by {max_scale}')
@@ -124,6 +130,7 @@ def main(argv=None):
         save_interval_epoch=args.save_interval_epoch, resume=args.resume,
         log_samples=args.log_samples, save_dir=args.save_dir,
         use_torch_compile=args.use_torch_compile,
+        use_ema=args.use_ema, ema_decay=args.ema_decay,
         image_size=args.image_size, guided=True,
     )
     encoder = CLIPTextEncoder(args.text_model_name)

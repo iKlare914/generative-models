@@ -6,6 +6,7 @@ from generative_model.config import TrainerConfig
 from generative_model.text_encoder import get_cifar10_prompt
 from uuid import uuid4
 from abc import ABC, abstractmethod
+from copy import deepcopy
 
 import torch as th
 import torch.nn as nn
@@ -18,10 +19,18 @@ from pathlib import Path
 logger = get_logger(__name__)
 
 class BaseTrainer(ABC):
-    """Checkpoint and gradient utilities; concrete trainers own their training setup."""
+    """Checkpoint, EMA and gradient utilities shared by concrete trainers."""
 
-    def __init__(self, *, model, optimizer, save_dir, training_method, resume=False):
+    def __init__(self, *, model, optimizer, save_dir, training_method, resume=False,
+                 use_ema=True, ema_decay=None):
+        if use_ema and ema_decay is None:
+            raise ValueError('ema_decay must be provided when use_ema=True')
+        if ema_decay is not None and not 0 <= ema_decay < 1:
+            raise ValueError('ema_decay must be in [0, 1)')
         self.model = model
+        self.use_ema = use_ema
+        self.ema_decay = ema_decay
+        self.ema_model = deepcopy(model).eval().requires_grad_(False) if use_ema else None
         self.device = next(model.parameters()).device
         self.use_bf16_autocast = False
         if self.device.type == "cuda" and th.cuda.is_available():
@@ -48,19 +57,22 @@ class BaseTrainer(ABC):
         raise NotImplementedError
 
     def save(self, epoch: int, loss: float) -> None:
-        """Save both state dicts under an epoch-sortable checkpoint filename."""
+        """Save training state and optional EMA weights in the same checkpoint."""
         if self.save_dir is None:
             return
 
         filename = f"{epoch:08d}_{loss:012.6f}_checkpoint.pt"
-        th.save({
+        checkpoint = {
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "last_epoch": epoch,
             "wandb_runid": self.wandb_runid,
             "global_steps": self.global_steps,
             "training_method": self.training_method,
-        }, self.save_dir / filename)
+        }
+        if self.use_ema:
+            checkpoint['ema_model'] = self.ema_model.state_dict()
+        th.save(checkpoint, self.save_dir / filename)
 
     def load(self, path: str | Path) -> None:
         """Restore model and optimizer state dicts from a single .pt file."""
@@ -73,6 +85,8 @@ class BaseTrainer(ABC):
                 f"but this trainer uses {self.training_method!r}."
             )
         self.model.load_state_dict(checkpoint["model"])
+        if self.use_ema:
+            self.ema_model.load_state_dict(checkpoint.get('ema_model', checkpoint['model']))
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.start_epoch = checkpoint['last_epoch']
         self.wandb_runid = checkpoint['wandb_runid']
@@ -88,6 +102,17 @@ class BaseTrainer(ABC):
             return
 
         self.load(checkpoints[-1])
+
+    @th.no_grad()
+    def update_ema(self) -> None:
+        """Average parameters after an optimizer step and copy model buffers."""
+        if not self.use_ema:
+            return
+        for ema_param, param in zip(self.ema_model.parameters(), self.model.parameters(), strict=True):
+            ema_param.lerp_(param, 1 - self.ema_decay)
+        # Buffers include running statistics and integer counters, not optimized weights.
+        for ema_buffer, buffer in zip(self.ema_model.buffers(), self.model.buffers(), strict=True):
+            ema_buffer.copy_(buffer)
 
     def get_grad_norm(self) -> float:
         """Return the L2 norm of all gradients flattened into one vector.
@@ -124,6 +149,7 @@ class Trainer(BaseTrainer):
         super().__init__(
             model=model, optimizer=optimizer, save_dir=config.save_dir,
             training_method='fm' if is_fm else 'ddpm', resume=config.resume,
+            use_ema=config.use_ema, ema_decay=config.ema_decay,
         )
         self.lr = config.lr
         self.dropout = config.dropout
@@ -187,6 +213,7 @@ class Trainer(BaseTrainer):
                             logger.warning(f"Gradient norm({grad_norm}) > 1, clipped to 1")
                             grad_norm = clip_grad_norm_(self.model.parameters(), max_norm=1.0, norm_type=2, error_if_nonfinite=True).item()
                         self.optimizer.step()
+                        self.update_ema()
 
                         # log
                         run.log({
@@ -222,6 +249,7 @@ class CFGTrainer(BaseTrainer):
         super().__init__(
             model=model, optimizer=optimizer, save_dir=config.save_dir,
             training_method='fm' if is_fm else 'ddpm', resume=config.resume,
+            use_ema=config.use_ema, ema_decay=config.ema_decay,
         )
         self.lr = config.lr
         self.dropout = config.dropout
@@ -301,6 +329,7 @@ class CFGTrainer(BaseTrainer):
                             logger.warning(f"Gradient norm({grad_norm}) > 1, clipped to 1")
                             grad_norm = clip_grad_norm_(self.model.parameters(), max_norm=1.0, norm_type=2, error_if_nonfinite=True).item()
                         self.optimizer.step()
+                        self.update_ema()
 
                         # log
                         run.log({
