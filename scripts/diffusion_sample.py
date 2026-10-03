@@ -5,16 +5,17 @@ Example:
 """
 
 import argparse
+import math
 from pathlib import Path
 
 from PIL import Image
 import torch
 
-from my_ddpm.logger import get_logger
-from my_ddpm.model import UNet
-from my_ddpm.sampler import DDIMSampler, DDPMSampler, display_image_uint8, make_beta_schedule
+from generative_model.logger import get_logger
+from generative_model.model import UNet
+from generative_model.sampler import DDIMSampler, DDPMSampler, FMSampler, display_image_uint8, make_beta_schedule
 
-logger = get_logger('my_ddpm.sample')
+logger = get_logger('generative_model.sample')
 
 
 def positive_int(value):
@@ -26,7 +27,7 @@ def positive_int(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--model-path', type=Path, required=True, help='Training checkpoint containing the model state dict under the model key')
+    parser.add_argument('--model-path', type=Path, required=True, help='Training checkpoint; load ema_model weights when available, otherwise model')
     parser.add_argument('--output-path', type=Path, help='Save the 3x3 grid to this image file (e.g. samples.png) instead of opening a viewer; omitted means no output is saved')
     parser.add_argument('--image-size', type=positive_int, required=True, help='Square image side length used during training')
     parser.add_argument('--model-channels', type=positive_int, default=64)
@@ -36,10 +37,12 @@ def parse_args(argv=None):
     parser.add_argument('--channel-mult', type=positive_int, nargs='+', default=[1, 2, 4])
     parser.add_argument('--attention-resolutions', type=positive_int, nargs='*', default=[16, 8], help='Feature-map side lengths, as in training; empty disables encoder/decoder attention')
     parser.add_argument('--num-heads', type=positive_int, default=4)
-    parser.add_argument('--sample', choices=['ddpm', 'ddim'], default='ddpm')
-    parser.add_argument('--timesteps', type=positive_int, default=1000, help='Original diffusion schedule length; must match training, also for DDIM')
+    parser.add_argument('--sample', choices=['ddpm', 'ddim', 'fm'], default='ddpm')
+    parser.add_argument('--fm-step', type=float, default=0.01, help='FM only: integration step size in (0, 1]')
+    parser.add_argument('--solver', choices=['euler'], default='euler', help='FM only: solver (currently only euler is supported)')
+    parser.add_argument('--timesteps', type=positive_int, default=1000, help='DDPM/DDIM only: original diffusion schedule length; must match training')
     parser.add_argument('--timestep-spacing', type=positive_int, default=20, help='DDIM only: stride through the original timesteps; the sampler also includes the last timestep')
-    parser.add_argument('--randomness', type=float, default=0.0, help='DDIM only: noise strength (eta), from 0 to 1')
+    parser.add_argument('--randomness', type=float, default=0.0, help='Noise strength in [0, 1]: DDIM eta; FM sigma(t) = randomness * sqrt(1-t)')
     parser.add_argument('--device', default='cpu', help='Torch device, e.g. cpu, mps, or cuda; never silently falls back')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args(argv)
@@ -67,9 +70,11 @@ def parse_args(argv=None):
         parser.error('--embedding-channels must be even')
     if not 0 <= args.dropout <= 1:
         parser.error('--dropout must be between 0 and 1')
-    if args.timesteps <= 50:
+    if args.sample != 'fm' and args.timesteps <= 50:
         parser.error('--timesteps must exceed 50 for this beta schedule')
-    if not 0 <= args.randomness <= 1:
+    if args.sample == 'fm' and (not math.isfinite(args.fm_step) or not 0 < args.fm_step <= 1):
+        parser.error('--fm-step must be finite and in (0, 1]')
+    if not math.isfinite(args.randomness) or not 0 <= args.randomness <= 1:
         parser.error('--randomness must be finite and between 0 and 1')
     return args
 
@@ -103,25 +108,43 @@ def main(argv=None):
         num_heads=args.num_heads, image_size=args.image_size,
     )
     checkpoint = torch.load(args.model_path, map_location='cpu', weights_only=True)
-    if not isinstance(checkpoint, dict) or 'model' not in checkpoint:
-        raise ValueError('Checkpoint must contain a model key holding the UNet state dict.')
-    model.load_state_dict(checkpoint['model'])
-    del checkpoint
+    if not isinstance(checkpoint, dict) or not any(key in checkpoint for key in ('ema_model', 'model')):
+        raise ValueError('Checkpoint must contain an ema_model or model key holding the UNet state dict.')
+    checkpoint_method = checkpoint.get('training_method', 'ddpm')
+    expected_method = 'fm' if args.sample == 'fm' else 'ddpm'
+    if checkpoint_method != expected_method:
+        raise ValueError(
+            f'Checkpoint training method is {checkpoint_method!r}, '
+            f'which is incompatible with --sample {args.sample}.'
+        )
+    weights_key = 'ema_model' if 'ema_model' in checkpoint else 'model'
+    state = checkpoint[weights_key]
+    # torch.compile adds this prefix to training state dicts.
+    torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(state, '_orig_mod.')
+    model.load_state_dict(state)
+    print(f'Loaded {weights_key} weights from {args.model_path}', flush=True)
+    del checkpoint, state
     model.to(device).eval()
 
-    betas = make_beta_schedule(args.timesteps)
-    if args.sample == 'ddim':
-        sampler = DDIMSampler(
-            model, spacing=args.timestep_spacing, randomness=args.randomness,
-            betas=betas, device=device,
-        )
+    if args.sample == 'fm':
+        sampler = FMSampler(args.fm_step, model, device=device, solver=args.solver, randomness=args.randomness)
+        num_steps = sampler.sample_nums
+        print(f'FM solver: {args.solver}, randomness: {args.randomness:g}', flush=True)
     else:
-        sampler = DDPMSampler(model, betas=betas, device=device)
+        betas = make_beta_schedule(args.timesteps)
+        if args.sample == 'ddim':
+            sampler = DDIMSampler(
+                model, spacing=args.timestep_spacing, randomness=args.randomness,
+                betas=betas, device=device,
+            )
+        else:
+            sampler = DDPMSampler(model, betas=betas, device=device)
+        num_steps = sampler.num_timesteps
     noise = torch.randn((9, 3, args.image_size, args.image_size), device=device)
-    print(f'Sampling 9 images with {args.sample.upper()} on {device}: {sampler.num_timesteps} steps', flush=True)
+    print(f'Sampling 9 images with {args.sample.upper()} on {device}: {num_steps} steps', flush=True)
     samples = sampler.sample(noise)
     if not torch.isfinite(samples).all():
-        raise RuntimeError('Sampling produced non-finite values; check the checkpoint and diffusion schedule.')
+        raise RuntimeError('Sampling produced non-finite values; check the checkpoint and sampler settings.')
     grid = make_grid(samples)
     if args.output_path is not None:
         grid.save(args.output_path)
