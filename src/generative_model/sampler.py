@@ -330,8 +330,8 @@ def _step(velocity, x, t, h, solver, randomness=0.0):
         if randomness > 0:
             vf = velocity(x, t)
             noise = th.randn_like(x)
-            drift = h * ((1 + t * math.pow(randomness, 2) / 2) * vf - x * (math.pow(randomness, 2) / 2))
-            diffusion = noise * math.sqrt(1 - t) * randomness * math.sqrt(h)
+            drift = h * ((1 + (1 - t) * t * math.pow(randomness, 2) / 2) * vf - x * (math.pow(randomness, 2) / 2) * (1 - t))
+            diffusion = noise * (1 - t) * randomness * math.sqrt(h)
             return x + drift + diffusion
         else:
             return x + h * velocity(x, t)
