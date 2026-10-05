@@ -17,7 +17,7 @@ uv run --no-sync --project "$SCRIPT_DIR/.." python "$SCRIPT_DIR/cfg_diffusion_sa
   --attention-resolutions 16 8 \
   --device cuda \
   --res-blocks 3 \
-  --num-heads 4 \
+  --num-heads 8 \
   --model-channels 128 \
   --embedding-channels 512 \
   --seed 114514 \

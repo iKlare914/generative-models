@@ -51,6 +51,7 @@ def parse_args(argv=None):
     parser.add_argument('--text-model-name', default='openai/clip-vit-base-patch32', help='CLIP model ID or local directory; CLIP runs on CPU')
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--prompt', type=str, default='', help='Text prompt for image generation')
     args = parser.parse_args(argv)
 
     if args.model_path is not None and not args.model_path.is_file():
@@ -100,7 +101,9 @@ def make_figure(samples, prompts, *, sample_method, guidance_scale, random_init=
     figure.suptitle(title, fontsize=15)
     for index, axis in enumerate(axes.flat):
         axis.imshow(pixels[index], interpolation='nearest')
-        prompt_title = prompts[index] if index < 9 else f'No prompt {index - 8} ("")'
+        prompt_title = prompts[index]
+        if prompt_title == '':
+            prompt_title = 'No prompt (unconditional)'
         axis.set_title(textwrap.fill(prompt_title, width=30), fontsize=10, pad=8)
         axis.set_axis_off()
     return figure
@@ -157,18 +160,25 @@ def main(argv=None):
     else:
         sampler = CFGDDPMSampler(model, betas=make_beta_schedule(args.timesteps), **options)
         num_steps = sampler.num_timesteps
-
-    prompts, context, mask = get_cifar10_prompt(9, encoder, max_length=args.eval_max_length, device=device)
-    noise = torch.randn((12, 3, args.image_size, args.image_size), device=device)
-    print(f'Sampling 9 prompted + 3 unconditional images with {args.sample.upper()}: {num_steps} steps', flush=True)
+    if args.prompt:
+        encoder = CLIPTextEncoder()
+        prompts = [args.prompt] * 12
+        print(f'Sampling 12 prompted images with prompt: {args.prompt}')
+        context, mask = encoder.encode_prompts(prompts, max_length=args.eval_max_length, device=device)
+        noise = torch.randn((12, 3, args.image_size, args.image_size), device=device)
+        samples = sampler.sample(noise, context=context, attention_mask=mask)
+    else:
+        prompts, context, mask = get_cifar10_prompt(9, encoder, max_length=args.eval_max_length, device=device)
+        noise = torch.randn((12, 3, args.image_size, args.image_size), device=device)
+        print(f'Sampling 9 prompted + 3 unconditional images with {args.sample.upper()}: {num_steps} steps', flush=True)
+        conditional = sampler.sample(noise[:9], context=context, attention_mask=mask)
+        unconditional = sampler.sample(noise[9:], prompts=['', '', ''], guidance_scale=0.0)
+        samples = torch.cat([conditional, unconditional])
     for index, prompt in enumerate(prompts, start=1):
         print(f'{index}: {prompt}', flush=True)
-    conditional = sampler.sample(noise[:9], context=context, attention_mask=mask)
-    unconditional = sampler.sample(noise[9:], prompts=['', '', ''], guidance_scale=0.0)
-    samples = torch.cat([conditional, unconditional])
     if not torch.isfinite(samples).all():
         raise RuntimeError('Sampling produced non-finite values; check the checkpoint and schedule.')
-    figure = make_figure(samples, prompts, sample_method=args.sample,
+    figure = make_figure(samples, prompts + ['', '', ''], sample_method=args.sample,
                          guidance_scale=args.guidance_scale, random_init=args.random_init,
                          solver=args.solver, randomness=args.randomness)
     if args.output_path is not None:
