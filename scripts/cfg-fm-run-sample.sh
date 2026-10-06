@@ -6,11 +6,14 @@ set -euo pipefail
 # Use --output-path samples.png to save the 4x3 titled figure.
 # --solver currently supports only euler (the default).
 # Use --randomness 0.5 to enable stochastic sampling (range: 0 to 1).
+# CFG-Zero* defaults to 5 skipped steps; override with --skip-steps N or --no-use-cfgzero-star.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 uv run --no-sync --project "$SCRIPT_DIR/.." python "$SCRIPT_DIR/cfg_diffusion_sample.py" \
   --sample fm \
   --fm-step 0.01 \
+  --use-cfgzero-star \
+  --skip-steps 5 \
   --solver euler \
   --randomness 0.0 \
   --image-size 32 \

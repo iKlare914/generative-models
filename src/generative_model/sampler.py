@@ -585,6 +585,7 @@ class CFGFMSampler:
 
     def __init__(
         self, step, model, device, randomness=0.0, loss_fn=th.nn.MSELoss(), *, guidance_scale=1.0, eval_max_length=77,
+        use_cfgzero_star=False, skip_steps=0,
         text_encoder: CLIPTextEncoder | None = None,
         text_model_name="openai/clip-vit-base-patch32",
         solver: Literal['euler'] = 'euler',
@@ -597,10 +598,16 @@ class CFGFMSampler:
             raise ValueError("solver must be 'euler'.")
         self.solver = solver
         self.sample_nums = math.ceil(1 / self.h)
+        if not isinstance(skip_steps, int) or skip_steps < 0:
+            raise ValueError("skip_steps must be a nonnegative integer.")
+        if use_cfgzero_star and skip_steps >= self.sample_nums:
+            raise ValueError("skip_steps must be less than the total number of FM steps.")
         self.model = model
         self.device = th.device(device)
         self.loss_fn = th.nn.MSELoss() if loss_fn is None else loss_fn
         self.guidance_scale = guidance_scale
+        self.use_cfgzero_star = use_cfgzero_star
+        self.skip_steps = skip_steps
         self.eval_max_length = eval_max_length
         self.text_encoder = text_encoder if text_encoder is not None else CLIPTextEncoder(text_model_name)
         self._empty_conditions: dict[int, tuple[th.Tensor, th.Tensor]] = {}
@@ -656,12 +663,23 @@ class CFGFMSampler:
                 return self.model(x, model_t, context, attention_mask)
             if scale == 0:
                 return self.model(x, model_t, empty, empty_mask)
-            conditional = self.model(x, model_t, context, attention_mask)
-            unconditional = self.model(x, model_t, empty, empty_mask)
-            return unconditional + scale * (conditional - unconditional)
-
+            conditional: th.Tensor = self.model(x, model_t, context, attention_mask)
+            unconditional: th.Tensor = self.model(x, model_t, empty, empty_mask)
+            if not self.use_cfgzero_star:
+                return unconditional + scale * (conditional - unconditional)
+            output_dtype = conditional.dtype
+            b, c, h, w = conditional.shape
+            conditional = conditional.reshape(b, -1).float()
+            unconditional = unconditional.reshape(b, -1).float()
+            numerator = (conditional * unconditional).sum(dim=1, keepdim=True)
+            denominator = unconditional.square().sum(dim=1, keepdim=True).clamp_min(1e-8)
+            adjust_scale = numerator / denominator
+            res: th.Tensor = (1 - scale) * adjust_scale * unconditional + scale * conditional
+            return res.reshape(b, c, h, w).to(output_dtype)
         try:
-            for index in tqdm(range(self.sample_nums), desc="CFG sampling"):
+            # Keep the initial state fixed during zero-init, retaining the original time grid.
+            start_step = self.skip_steps if self.use_cfgzero_star else 0
+            for index in tqdm(range(start_step, self.sample_nums), desc="CFG sampling"):
                 t = index * self.h
                 step_size = min(self.h, 1 - t)
                 x_t = _step(velocity, x_t, t, step_size, self.solver, self.randomness)
