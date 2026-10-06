@@ -36,6 +36,30 @@ def position_embedding(x: th.Tensor, emb_dim: int):
     )
     return emb
 
+class AdaptiveLayerNorm(nn.Module):
+    def __init__(self, hidden_dim , emb_dim, is_zero_init=True):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.emb_dim = emb_dim
+        self.layer_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.affine_layer = zero_init(nn.Linear(emb_dim, 3 * hidden_dim)) if is_zero_init else nn.Linear(emb_dim, 3 * hidden_dim)
+
+    def forward(self, x: th.Tensor, emb: th.Tensor):
+        """
+        Apply adaptive layer normalization to input x
+        Return normalized input and alpha factor for residual path
+        Args:
+            x: Tensor [B, L, D]
+            emb: Tensor [B, emb_dim]
+        Returns:
+            result: Tensor [B, L, D]
+            alpha: Tensor [B, 1, D]
+        """
+        normed_x = self.layer_norm(x)
+        gamma, beta, alpha = self.affine_layer(emb).unsqueeze(1).chunk(3, dim=-1) # 3 * [B, 1, hidden_dim]
+        normed_x = (1 + gamma) * normed_x + beta
+        return normed_x, alpha
+
 class UpSampleBlock(nn.Module):
     def __init__(self, in_channels, out_channels, scale_factor=2, use_conv=False):
         super().__init__()
