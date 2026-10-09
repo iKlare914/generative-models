@@ -395,7 +395,8 @@ class UNet(nn.Module):
                     embedding_channel,
                     dropout,
                     is_upsample=False,
-                    is_downsample=False
+                    is_downsample=False,
+                    use_conv=use_conv
                 )
                 cur_ch = int(model_channel * mult)
                 layers.append(resblock)
@@ -415,7 +416,8 @@ class UNet(nn.Module):
                             cur_ch,
                             embedding_channel,
                             dropout,
-                            is_downsample=True   
+                            is_downsample=True,
+                            use_conv=use_conv
                         )
                     )
                 )
@@ -428,7 +430,8 @@ class UNet(nn.Module):
                 cur_ch,
                 cur_ch,
                 embedding_channel,
-                dropout
+                dropout,
+                use_conv=use_conv
             ),
             AttentionBlock(
                 cur_ch,
@@ -438,7 +441,8 @@ class UNet(nn.Module):
                 cur_ch,
                 cur_ch,
                 embedding_channel,
-                dropout
+                dropout,
+                use_conv=use_conv
             )
         )
 
@@ -452,7 +456,8 @@ class UNet(nn.Module):
                         encoder_out_ch + cur_ch,
                         int(model_channel * mult),
                         embedding_channel,
-                        dropout    
+                        dropout,
+                        use_conv=use_conv
                     )
                 ]
                 cur_ch = int(model_channel * mult)
@@ -470,7 +475,8 @@ class UNet(nn.Module):
                             cur_ch,
                             embedding_channel,
                             dropout,
-                            is_upsample=True
+                            is_upsample=True,
+                            use_conv=use_conv
                         )
                     )
                     downsample_scale_factor //= 2
@@ -565,7 +571,8 @@ class CFGUNet(nn.Module):
                     embedding_channel,
                     dropout,
                     is_upsample=False,
-                    is_downsample=False
+                    is_downsample=False,
+                    use_conv=use_conv
                 )
                 cur_ch = int(model_channel * mult)
                 layers.append(resblock)
@@ -591,7 +598,8 @@ class CFGUNet(nn.Module):
                             cur_ch,
                             embedding_channel,
                             dropout,
-                            is_downsample=True   
+                            is_downsample=True,
+                            use_conv=use_conv
                         )
                     )
                 )
@@ -604,7 +612,8 @@ class CFGUNet(nn.Module):
                 cur_ch,
                 cur_ch,
                 embedding_channel,
-                dropout
+                dropout,
+                use_conv=use_conv
             ),
             AttentionBlock(
                 cur_ch,
@@ -619,7 +628,8 @@ class CFGUNet(nn.Module):
                 cur_ch,
                 cur_ch,
                 embedding_channel,
-                dropout
+                dropout,
+                use_conv=use_conv
             )
         )
 
@@ -633,7 +643,8 @@ class CFGUNet(nn.Module):
                         encoder_out_ch + cur_ch,
                         int(model_channel * mult),
                         embedding_channel,
-                        dropout    
+                        dropout,
+                        use_conv=use_conv
                     )
                 ]
                 cur_ch = int(model_channel * mult)
@@ -658,7 +669,8 @@ class CFGUNet(nn.Module):
                             cur_ch,
                             embedding_channel,
                             dropout,
-                            is_upsample=True
+                            is_upsample=True,
+                            use_conv=use_conv
                         )
                     )
                     downsample_scale_factor //= 2
@@ -738,7 +750,8 @@ class Encoder(nn.Module):
                     int(model_channel * mult),
                     dropout,
                     is_upsample=False,
-                    is_downsample=False
+                    is_downsample=False,
+                    use_conv=use_conv
                 )
                 cur_ch = int(model_channel * mult)
                 layers.append(resblock)
@@ -757,7 +770,8 @@ class Encoder(nn.Module):
                             cur_ch,
                             cur_ch,
                             dropout,
-                            is_downsample=True   
+                            is_downsample=True,
+                            use_conv=use_conv
                         )
                     )
                 )
@@ -768,7 +782,8 @@ class Encoder(nn.Module):
             ResidualBlock(
                 cur_ch,
                 cur_ch,
-                dropout
+                dropout,
+                use_conv=use_conv
             ),
             AttentionBlock(
                 cur_ch,
@@ -777,7 +792,8 @@ class Encoder(nn.Module):
             ResidualBlock(
                 cur_ch,
                 cur_ch,
-                dropout
+                dropout,
+                use_conv=use_conv
             ),
             nn.GroupNorm(32, cur_ch),
             nn.SiLU(),
@@ -823,7 +839,8 @@ class Decoder(nn.Module):
             ResidualBlock(
                 cur_ch,
                 cur_ch,
-                dropout
+                dropout,
+                use_conv=use_conv
             ),
             AttentionBlock(
                 cur_ch,
@@ -832,7 +849,8 @@ class Decoder(nn.Module):
             ResidualBlock(
                 cur_ch,
                 cur_ch,
-                dropout
+                dropout,
+                use_conv=use_conv
             )
         )
 
@@ -844,7 +862,8 @@ class Decoder(nn.Module):
                     ResidualBlock(
                         cur_ch,
                         int(model_channel * mult),
-                        dropout    
+                        dropout,
+                        use_conv=use_conv
                     )
                 ]
                 cur_ch = int(model_channel * mult)
@@ -861,7 +880,8 @@ class Decoder(nn.Module):
                             cur_ch,
                             cur_ch,
                             dropout,
-                            is_upsample=True
+                            is_upsample=True,
+                            use_conv=use_conv
                         )
                     )
                     downsample_scale_factor //= 2
