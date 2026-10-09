@@ -37,28 +37,23 @@ def position_embedding(x: th.Tensor, emb_dim: int):
     return emb
 
 class AdaptiveLayerNorm(nn.Module):
-    def __init__(self, hidden_dim , emb_dim, is_zero_init=True):
+    def __init__(self, hidden_dim , emb_dim, exp_scale=6, is_zero_init=True):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.emb_dim = emb_dim
-        self.layer_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.affine_layer = zero_init(nn.Linear(emb_dim, 3 * hidden_dim)) if is_zero_init else nn.Linear(emb_dim, 3 * hidden_dim)
+        self.exp_scale = exp_scale
+        self.affine_layer = zero_init(nn.Linear(emb_dim, exp_scale * hidden_dim)) if is_zero_init else nn.Linear(emb_dim, exp_scale * hidden_dim)
 
-    def forward(self, x: th.Tensor, emb: th.Tensor):
+    def forward(self, x: th.Tensor, emb: th.Tensor) -> th.Tensor:
         """
-        Apply adaptive layer normalization to input x
-        Return normalized input and alpha factor for residual path
+        Apply adaptive layer normalization
         Args:
-            x: Tensor [B, L, D]
             emb: Tensor [B, emb_dim]
         Returns:
-            result: Tensor [B, L, D]
-            alpha: Tensor [B, 1, D]
+            result: Tensor [B, 1, exp_scale * hidden_dim]
         """
-        normed_x = self.layer_norm(x)
-        gamma, beta, alpha = self.affine_layer(emb).unsqueeze(1).chunk(3, dim=-1) # 3 * [B, 1, hidden_dim]
-        normed_x = (1 + gamma) * normed_x + beta
-        return normed_x, alpha
+        result = self.affine_layer(emb).unsqueeze(1) # [B, 1, exp_scale * hidden_dim]
+        return result
 
 class UpSampleBlock(nn.Module):
     def __init__(self, in_channels, out_channels, scale_factor=2, use_conv=False):
@@ -93,7 +88,57 @@ class TimeEmbeddedBlock(nn.Module):
         Apply time embedding to input x
         """
 
-class ResidualBlock(TimeEmbeddedBlock):
+class ResidualBlock(nn.Module):
+    """
+    Residual connection for UNet
+    """
+    def __init__(self, in_channel, out_channel, emb_channel, dropout, is_upsample=False, is_downsample=False, use_conv=False):
+        super().__init__()
+        self.in_layers = nn.Sequential(
+            nn.GroupNorm(32, in_channel),
+            nn.SiLU()
+        )
+        self.conv = nn.Conv2d(in_channel, out_channel, 3, padding=1)
+        if is_upsample:
+            self.x_upd = UpSampleBlock(out_channel, out_channel, 2, use_conv)
+            self.h_upd = UpSampleBlock(out_channel, out_channel, 2, use_conv)
+        elif is_downsample:
+            self.x_upd = DownSampleBlock(out_channel, out_channel, 2, use_conv)
+            self.h_upd = DownSampleBlock(out_channel, out_channel, 2, use_conv)
+        else:
+            self.x_upd = nn.Identity()
+            self.h_upd = nn.Identity()
+
+        self.out_layers = nn.Sequential(
+            nn.GroupNorm(32, out_channel),
+            nn.SiLU(),
+            nn.Dropout(p=dropout),
+            zero_init(nn.Conv2d(out_channel, out_channel, 3, padding=1))
+        )
+
+        if in_channel == out_channel:
+            self.skip_connection = nn.Identity()
+        elif use_conv:
+            self.skip_connection = nn.Conv2d(in_channel, out_channel, 3, padding=1)
+        else:
+            self.skip_connection = nn.Conv2d(in_channel, out_channel, 1)
+
+    def forward(self, x: th.Tensor):
+        """
+        Args:
+            x: Tensor [B, C, H, W]
+        Returns:
+            result: Tensor [B, C, H, W]
+        """
+        h = self.in_layers(x)
+        h = self.h_upd(h)
+        h = self.conv(h)
+        x = self.x_upd(x)
+
+        h = self.out_layers(h)
+        return self.skip_connection(x) + h
+
+class TimeEmbeddedResidualBlock(TimeEmbeddedBlock):
     """
     Residual connection for UNet
     """
@@ -344,7 +389,7 @@ class UNet(nn.Module):
         for level, mult in enumerate(ch_mult):
             for _ in range(resblock_num):
                 layers = []
-                resblock = ResidualBlock(
+                resblock = TimeEmbeddedResidualBlock(
                     cur_ch,
                     int(model_channel * mult),
                     embedding_channel,
@@ -365,7 +410,7 @@ class UNet(nn.Module):
             if level != len(ch_mult) - 1:
                 self.encoder.append(
                     TimeSequentialBlock(
-                        ResidualBlock(
+                        TimeEmbeddedResidualBlock(
                             cur_ch,
                             cur_ch,
                             embedding_channel,
@@ -379,7 +424,7 @@ class UNet(nn.Module):
 
         # Bottleneck Part
         self.bottleneck = TimeSequentialBlock(
-            ResidualBlock(
+            TimeEmbeddedResidualBlock(
                 cur_ch,
                 cur_ch,
                 embedding_channel,
@@ -389,7 +434,7 @@ class UNet(nn.Module):
                 cur_ch,
                 num_heads
             ),
-            ResidualBlock(
+            TimeEmbeddedResidualBlock(
                 cur_ch,
                 cur_ch,
                 embedding_channel,
@@ -403,7 +448,7 @@ class UNet(nn.Module):
             for i in range(resblock_num + 1):
                 encoder_out_ch = encoder_chs.pop()
                 layers = [
-                    ResidualBlock(
+                    TimeEmbeddedResidualBlock(
                         encoder_out_ch + cur_ch,
                         int(model_channel * mult),
                         embedding_channel,
@@ -420,7 +465,7 @@ class UNet(nn.Module):
                     )
                 if level and i == resblock_num:
                     layers.append(
-                        ResidualBlock(
+                        TimeEmbeddedResidualBlock(
                             cur_ch,
                             cur_ch,
                             embedding_channel,
@@ -514,7 +559,7 @@ class CFGUNet(nn.Module):
         for level, mult in enumerate(ch_mult):
             for _ in range(resblock_num):
                 layers = []
-                resblock = ResidualBlock(
+                resblock = TimeEmbeddedResidualBlock(
                     cur_ch,
                     int(model_channel * mult),
                     embedding_channel,
@@ -541,7 +586,7 @@ class CFGUNet(nn.Module):
             if level != len(ch_mult) - 1:
                 self.encoder.append(
                     TimeSequentialBlock(
-                        ResidualBlock(
+                        TimeEmbeddedResidualBlock(
                             cur_ch,
                             cur_ch,
                             embedding_channel,
@@ -555,7 +600,7 @@ class CFGUNet(nn.Module):
 
         # Bottleneck Part
         self.bottleneck = TimeSequentialBlock(
-            ResidualBlock(
+            TimeEmbeddedResidualBlock(
                 cur_ch,
                 cur_ch,
                 embedding_channel,
@@ -570,7 +615,7 @@ class CFGUNet(nn.Module):
                 feature_channel,
                 num_heads
             ),
-            ResidualBlock(
+            TimeEmbeddedResidualBlock(
                 cur_ch,
                 cur_ch,
                 embedding_channel,
@@ -584,7 +629,7 @@ class CFGUNet(nn.Module):
             for i in range(resblock_num + 1):
                 encoder_out_ch = encoder_chs.pop()
                 layers = [
-                    ResidualBlock(
+                    TimeEmbeddedResidualBlock(
                         encoder_out_ch + cur_ch,
                         int(model_channel * mult),
                         embedding_channel,
@@ -608,7 +653,7 @@ class CFGUNet(nn.Module):
                     )
                 if level and i == resblock_num:
                     layers.append(
-                        ResidualBlock(
+                        TimeEmbeddedResidualBlock(
                             cur_ch,
                             cur_ch,
                             embedding_channel,
@@ -652,3 +697,8 @@ class CFGUNet(nn.Module):
             h = layer(h, emb, context, attention_mask)
         out = self.out(h)
         return out
+
+class VariationalAutoEncoder(nn.Module):
+    def __init__(
+            self,
+    ):
