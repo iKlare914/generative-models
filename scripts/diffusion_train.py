@@ -15,6 +15,7 @@ import torch
 
 from generative_model.config import TrainerConfig
 from generative_model.load_dataset import getCifarLoader
+from generative_model.cli_config import parse_args_with_config
 from generative_model.models.unet import UNet
 from generative_model.sampler import DDPMSampler, FMSampler, FMTimestepSampler, TimestepSampler, make_beta_schedule
 from generative_model.trainer import Trainer
@@ -41,6 +42,8 @@ def parse_args(argv=None):
     parser.add_argument('--channel-mult', type=positive_int, nargs='+', default=[1, 2, 4])
     parser.add_argument('--attention-resolutions', type=positive_int, nargs='*', default=[16, 8], help='Actual feature-map side lengths in encoder AND decoder, not downsampling factors; empty disables their attention. Bottleneck retains attention.')
     parser.add_argument('--num-heads', type=positive_int, default=4)
+    parser.add_argument('--use-conv', action=argparse.BooleanOptionalAction, default=False, help='Use convolutions in resampling and residual shortcuts')
+    parser.add_argument('--attn-o-proj-zeroinit', action=argparse.BooleanOptionalAction, default=False, help='Zero-initialize attention output projections')
     parser.add_argument('--method', choices=['ddpm', 'fm'], default='ddpm')
     parser.add_argument('--timesteps', type=positive_int, default=1000, help='DDPM only: diffusion schedule length')
     parser.add_argument('--fm-step', type=float, default=0.01, help='FM only: integration step size in (0, 1] for logged samples; does not discretize training time')
@@ -50,15 +53,15 @@ def parse_args(argv=None):
     parser.add_argument('--cache-dir', type=Path, default=Path('.cache/huggingface/datasets'))
     parser.add_argument('--save-dir', type=Path, default=Path('checkpoints/cifar10'))
     parser.add_argument('--save-interval-epoch', type=positive_int, default=10)
-    parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--resume', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--use-ema', action=argparse.BooleanOptionalAction, default=True, help='Maintain EMA model weights')
     parser.add_argument('--ema-decay', type=float, help='EMA decay in [0, 1); required when EMA is enabled')
-    parser.add_argument('--use-torch-compile', action='store_true', help='Compile the training model with torch.compile')
-    parser.add_argument('--log-samples', action='store_true', help='Generate eight images whenever a checkpoint is saved')
+    parser.add_argument('--use-torch-compile', action=argparse.BooleanOptionalAction, default=False, help='Compile the training model with torch.compile')
+    parser.add_argument('--log-samples', action=argparse.BooleanOptionalAction, default=False, help='Generate eight images whenever a checkpoint is saved')
     parser.add_argument('--device', default='cuda', help='Torch device, e.g. cuda, cuda:0, or cpu; never silently falls back')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--wandb-mode', choices=['online', 'offline', 'disabled'], default='online')
-    args = parser.parse_args(argv)
+    args = parse_args_with_config(parser, argv)
     if args.use_ema and args.ema_decay is None:
         parser.error('--ema-decay is required when EMA is enabled; use --no-use-ema to disable it')
     if args.ema_decay is not None and not 0 <= args.ema_decay < 1:
@@ -126,6 +129,7 @@ def main(argv=None):
         dropout=args.dropout, ch_mult=tuple(args.channel_mult),
         attention_resolution=tuple(args.attention_resolutions),
         num_heads=args.num_heads, image_size=args.image_size,
+        use_conv=args.use_conv, attn_o_proj_zeroinit=args.attn_o_proj_zeroinit,
     ).to(device)
     if args.method == 'fm':
         sampler = FMSampler(args.fm_step, model, device=device, solver=args.solver)

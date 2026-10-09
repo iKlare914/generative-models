@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=2.5.3",
     "pillow>=12.3.0",
     "pydantic>=2.13.5",
+    "pyyaml>=6.0.3",
     "torch>=2.14.0",
     "torchvision>=0.29.0",
     "tqdm>=4.70.1",

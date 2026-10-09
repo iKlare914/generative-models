@@ -1,0 +1,40 @@
+# Entry point: scripts/cfg_diffusion_train.py
+# Relative file paths are resolved from this YAML directory. CLI options override YAML.
+# EMA decay was not specified in the old shell launcher; 0.9999 is an editable starting value.
+image_size: 32
+epochs: 768
+batch_size: 256
+lr: 0.0002
+dropout: 0.1
+weight_decay: 0.005
+model_channels: 128
+embedding_channels: 512
+feature_channels: 512
+res_blocks: 3
+channel_mult: [1, 2, 4]
+attention_resolutions: [16, 8]
+num_heads: 8
+method: fm
+timesteps: 1000
+fm_step: 0.01
+solver: euler
+dataset: uoft-cs/cifar10
+text_model_name: openai/clip-vit-base-patch32
+label_drop_rate: 0.2
+train_max_length: 24
+eval_max_length: 77
+guidance_scale: 3.99
+num_workers: 4
+cache_dir: ../../.cache/huggingface/datasets
+save_dir: ../../checkpoints/cifar10-cfg-fm-2
+save_interval_epoch: 64
+resume: false
+use_ema: true
+ema_decay: 0.9999
+use_torch_compile: true
+log_samples: true
+device: cuda
+seed: 114514
+wandb_mode: online
+use_conv: false
+attn_o_proj_zeroinit: false

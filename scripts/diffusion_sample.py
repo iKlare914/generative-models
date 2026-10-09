@@ -12,6 +12,7 @@ from PIL import Image
 import torch
 
 from generative_model.logger import get_logger
+from generative_model.cli_config import parse_args_with_config
 from generative_model.models.unet import UNet
 from generative_model.sampler import DDIMSampler, DDPMSampler, FMSampler, display_image_uint8, make_beta_schedule
 
@@ -37,6 +38,8 @@ def parse_args(argv=None):
     parser.add_argument('--channel-mult', type=positive_int, nargs='+', default=[1, 2, 4])
     parser.add_argument('--attention-resolutions', type=positive_int, nargs='*', default=[16, 8], help='Feature-map side lengths, as in training; empty disables encoder/decoder attention')
     parser.add_argument('--num-heads', type=positive_int, default=4)
+    parser.add_argument('--use-conv', action=argparse.BooleanOptionalAction, default=False, help='Use convolutions in resampling and residual shortcuts')
+    parser.add_argument('--attn-o-proj-zeroinit', action=argparse.BooleanOptionalAction, default=False, help='Zero-initialize attention output projections')
     parser.add_argument('--sample', choices=['ddpm', 'ddim', 'fm'], default='ddpm')
     parser.add_argument('--fm-step', type=float, default=0.01, help='FM only: integration step size in (0, 1]')
     parser.add_argument('--solver', choices=['euler'], default='euler', help='FM only: solver (currently only euler is supported)')
@@ -45,7 +48,7 @@ def parse_args(argv=None):
     parser.add_argument('--randomness', type=float, default=0.0, help='Noise strength in [0, 1]: DDIM eta; FM sigma(t) = randomness * sqrt(1-t)')
     parser.add_argument('--device', default='cpu', help='Torch device, e.g. cpu, mps, or cuda; never silently falls back')
     parser.add_argument('--seed', type=int, default=42)
-    args = parser.parse_args(argv)
+    args = parse_args_with_config(parser, argv)
 
     if not args.model_path.is_file():
         parser.error(f'--model-path is not a file: {args.model_path}')
@@ -106,6 +109,7 @@ def main(argv=None):
         dropout=args.dropout, ch_mult=tuple(args.channel_mult),
         attention_resolution=tuple(args.attention_resolutions),
         num_heads=args.num_heads, image_size=args.image_size,
+        use_conv=args.use_conv, attn_o_proj_zeroinit=args.attn_o_proj_zeroinit,
     )
     checkpoint = torch.load(args.model_path, map_location='cpu', weights_only=True)
     if not isinstance(checkpoint, dict) or not any(key in checkpoint for key in ('ema_model', 'model')):

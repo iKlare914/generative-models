@@ -1,0 +1,34 @@
+# Entry point: scripts/diffusion_train.py
+# Relative file paths are resolved from this YAML directory. CLI options override YAML.
+# EMA decay was not specified in the old shell launcher; 0.9999 is an editable starting value.
+image_size: 32
+epochs: 16
+batch_size: 64
+lr: 0.0001
+dropout: 0.1
+weight_decay: 0.01
+model_channels: 128
+embedding_channels: 512
+res_blocks: 3
+channel_mult: [1, 2, 4]
+attention_resolutions: [16, 8]
+num_heads: 4
+method: ddpm
+timesteps: 1000
+fm_step: 0.01
+solver: euler
+dataset: uoft-cs/cifar10
+num_workers: 4
+cache_dir: ../../.cache/huggingface/datasets
+save_dir: ../../checkpoints/cifar10-20260924-4
+save_interval_epoch: 1
+resume: false
+use_ema: true
+ema_decay: 0.9999
+use_torch_compile: false
+log_samples: true
+device: cuda
+seed: 114514
+wandb_mode: online
+use_conv: false
+attn_o_proj_zeroinit: false

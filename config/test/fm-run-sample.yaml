@@ -1,0 +1,23 @@
+# Entry point: scripts/diffusion_sample.py
+# Relative file paths are resolved from this YAML directory. CLI options override YAML.
+# Set model_path (or random_init: true for CFG smoke tests) before sampling.
+model_path: null
+output_path: null
+image_size: 32
+model_channels: 128
+embedding_channels: 512
+res_blocks: 3
+dropout: 0.1
+channel_mult: [1, 2, 4]
+attention_resolutions: [16, 8]
+num_heads: 8
+sample: fm
+fm_step: 0.01
+solver: euler
+timesteps: 1000
+timestep_spacing: 20
+randomness: 0.0
+device: cuda
+seed: 114514
+use_conv: false
+attn_o_proj_zeroinit: false
