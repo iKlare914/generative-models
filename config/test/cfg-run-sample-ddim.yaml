@@ -14,10 +14,8 @@ channel_mult: [1, 2, 4]
 attention_resolutions: [16, 8]
 num_heads: 4
 sample: ddim
-fm_step: 0.01
 use_cfgzero_star: false
-skip_steps: 5
-solver: euler
+skip_steps: 0
 timesteps: 1000
 timestep_spacing: 10
 randomness: 0.0
@@ -28,4 +26,4 @@ device: cuda
 seed: 114514
 prompt: ''
 use_conv: false
-attn_o_proj_zeroinit: false
+attn_o_proj_zeroinit: true

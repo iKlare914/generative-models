@@ -15,8 +15,6 @@ attention_resolutions: [16, 8]
 num_heads: 4
 method: ddpm
 timesteps: 1000
-fm_step: 0.01
-solver: euler
 dataset: uoft-cs/cifar10
 num_workers: 4
 cache_dir: ../../.cache/huggingface/datasets
@@ -31,4 +29,4 @@ device: cuda
 seed: 114514
 wandb_mode: online
 use_conv: false
-attn_o_proj_zeroinit: false
+attn_o_proj_zeroinit: true

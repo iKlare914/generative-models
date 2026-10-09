@@ -15,7 +15,6 @@ channel_mult: [1, 2, 4]
 attention_resolutions: [16, 8]
 num_heads: 8
 method: fm
-timesteps: 1000
 fm_step: 0.01
 solver: euler
 dataset: uoft-cs/cifar10
@@ -37,4 +36,4 @@ device: cuda
 seed: 114514
 wandb_mode: online
 use_conv: false
-attn_o_proj_zeroinit: false
+attn_o_proj_zeroinit: true

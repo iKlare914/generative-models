@@ -18,14 +18,12 @@ fm_step: 0.01
 use_cfgzero_star: true
 skip_steps: 5
 solver: euler
-timesteps: 1000
-timestep_spacing: 20
 randomness: 0.0
-guidance_scale: 3.0
+guidance_scale: 4.0
 eval_max_length: 77
 text_model_name: openai/clip-vit-base-patch32
 device: cuda
 seed: 114514
 prompt: ''
 use_conv: false
-attn_o_proj_zeroinit: false
+attn_o_proj_zeroinit: true

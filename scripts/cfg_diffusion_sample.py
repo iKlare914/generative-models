@@ -15,7 +15,7 @@ import torch
 
 from generative_model.cli_config import parse_args_with_config
 from generative_model.models.unet import CFGUNet
-from generative_model.sampler import CFGDDIMSampler, CFGDDPMSampler, CFGFMSampler, display_image_uint8, make_beta_schedule
+from generative_model.sampler import CFGDDIMSampler, CFGDDPMSampler, CFGFMSampler, display_image_uint8, make_beta_schedule, validate_cfg_skip_steps
 from generative_model.text_encoder import CLIPTextEncoder, get_cifar10_prompt
 
 
@@ -47,9 +47,9 @@ def parse_args(argv=None):
     parser.add_argument('--fm-step', type=float, default=0.01)
     parser.add_argument('--use-cfgzero-star', '--use-cfgzero_star', dest='use_cfgzero_star',
                         action=argparse.BooleanOptionalAction, default=False,
-                        help='FM only: enable CFG-Zero* projection scaling and initial skipped steps')
-    parser.add_argument('--skip-steps', type=int, default=5,
-                        help='FM only: initial steps to skip when CFG-Zero* is enabled; 0 disables skipping')
+                        help='Enable CFG-Zero* projection scaling for DDPM, DDIM or FM; requires --skip-steps')
+    parser.add_argument('--skip-steps', type=int, default=None,
+                        help='Initial sampling updates to skip, independently of CFG-Zero*; required when CFG-Zero* is enabled, otherwise defaults to 0. DDIM counts reduced-schedule steps.')
     parser.add_argument('--solver', choices=['euler'], default='euler', help='FM only: solver (currently only euler is supported)')
     parser.add_argument('--timesteps', type=positive_int, default=1000, help='DDPM/DDIM: schedule length used in training')
     parser.add_argument('--timestep-spacing', type=positive_int, default=20, help='DDIM timestep stride')
@@ -86,10 +86,17 @@ def parse_args(argv=None):
         parser.error('--timesteps must exceed 50 for this beta schedule')
     if args.sample == 'fm' and (not math.isfinite(args.fm_step) or not 0 < args.fm_step <= 1):
         parser.error('--fm-step must be finite and in (0, 1]')
-    if args.skip_steps < 0:
-        parser.error('--skip-steps must be nonnegative')
-    if args.sample == 'fm' and args.use_cfgzero_star and args.skip_steps >= math.ceil(1 / args.fm_step):
-        parser.error('--skip-steps must be less than the total number of FM steps')
+    if args.sample == 'fm':
+        total_steps = math.ceil(1 / args.fm_step)
+    elif args.sample == 'ddim':
+        total_steps = len(range(0, args.timesteps, args.timestep_spacing))
+        total_steps += (args.timesteps - 1) % args.timestep_spacing != 0
+    else:
+        total_steps = args.timesteps
+    try:
+        args.skip_steps = validate_cfg_skip_steps(args.use_cfgzero_star, args.skip_steps, total_steps)
+    except ValueError as exc:
+        parser.error(str(exc))
     if not math.isfinite(args.guidance_scale) or args.guidance_scale < 0:
         parser.error('--guidance-scale must be finite and nonnegative')
     if not 2 <= args.eval_max_length <= 77:
@@ -161,21 +168,21 @@ def main(argv=None):
     model.to(device).eval()
     encoder = CLIPTextEncoder(args.text_model_name)
     options = dict(device=device, text_encoder=encoder, guidance_scale=args.guidance_scale,
-                   eval_max_length=args.eval_max_length)
+                   eval_max_length=args.eval_max_length,
+                   use_cfgzero_star=args.use_cfgzero_star, skip_steps=args.skip_steps)
     if args.sample == 'fm':
-        sampler = CFGFMSampler(args.fm_step, model, solver=args.solver, randomness=args.randomness,
-                               use_cfgzero_star=args.use_cfgzero_star, skip_steps=args.skip_steps, **options)
-        skipped_steps = args.skip_steps if args.use_cfgzero_star else 0
-        num_steps = sampler.sample_nums - skipped_steps
-        print(f'FM solver: {args.solver}, randomness: {args.randomness:g}, '
-              f'CFG-Zero*: {args.use_cfgzero_star}, skipped steps: {skipped_steps}', flush=True)
+        sampler = CFGFMSampler(args.fm_step, model, solver=args.solver, randomness=args.randomness, **options)
+        num_steps = sampler.sample_nums - sampler.skip_steps
+        print(f'FM solver: {args.solver}, randomness: {args.randomness:g}', flush=True)
     elif args.sample == 'ddim':
         sampler = CFGDDIMSampler(model, spacing=args.timestep_spacing, randomness=args.randomness,
                                  betas=make_beta_schedule(args.timesteps), **options)
-        num_steps = sampler.num_timesteps
+        num_steps = sampler.num_timesteps - sampler.skip_steps
     else:
         sampler = CFGDDPMSampler(model, betas=make_beta_schedule(args.timesteps), **options)
-        num_steps = sampler.num_timesteps
+        num_steps = sampler.num_timesteps - sampler.skip_steps
+    print(f'CFG-Zero*: {args.use_cfgzero_star}, skipped steps: {sampler.skip_steps}, '
+          f'sampling updates: {num_steps}', flush=True)
     if args.prompt:
         encoder = CLIPTextEncoder()
         prompts = [args.prompt] * 12

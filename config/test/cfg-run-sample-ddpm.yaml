@@ -14,18 +14,14 @@ channel_mult: [1, 2, 4]
 attention_resolutions: [16, 8]
 num_heads: 4
 sample: ddpm
-fm_step: 0.01
 use_cfgzero_star: false
-skip_steps: 5
-solver: euler
+skip_steps: 0
 timesteps: 1000
-timestep_spacing: 20
-randomness: 0.0
-guidance_scale: 3.0
+guidance_scale: 4.0
 eval_max_length: 77
 text_model_name: openai/clip-vit-base-patch32
 device: cuda
 seed: 114514
 prompt: ''
 use_conv: false
-attn_o_proj_zeroinit: false
+attn_o_proj_zeroinit: true

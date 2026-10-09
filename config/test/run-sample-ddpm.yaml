@@ -11,12 +11,8 @@ channel_mult: [1, 2, 4]
 attention_resolutions: [16, 8]
 num_heads: 4
 sample: ddpm
-fm_step: 0.01
-solver: euler
 timesteps: 1000
-timestep_spacing: 20
-randomness: 0.0
 device: cuda
 seed: 114514
 use_conv: false
-attn_o_proj_zeroinit: false
+attn_o_proj_zeroinit: true

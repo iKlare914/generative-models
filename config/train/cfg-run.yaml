@@ -16,8 +16,6 @@ attention_resolutions: [16, 8]
 num_heads: 4
 method: ddpm
 timesteps: 1000
-fm_step: 0.01
-solver: euler
 dataset: uoft-cs/cifar10
 text_model_name: openai/clip-vit-base-patch32
 label_drop_rate: 0.2
@@ -37,4 +35,4 @@ device: cuda
 seed: 114514
 wandb_mode: online
 use_conv: false
-attn_o_proj_zeroinit: false
+attn_o_proj_zeroinit: true

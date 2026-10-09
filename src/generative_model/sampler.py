@@ -432,6 +432,19 @@ class FMTimestepSampler():
             raise NotImplementedError(f"{self.strategy} sampling is not implemented")
 
 
+def validate_cfg_skip_steps(use_cfgzero_star, skip_steps, total_steps):
+    """Resolve optional skipping; CFG-Zero* requires an explicit skip count, including 0."""
+    if skip_steps is None:
+        if use_cfgzero_star:
+            raise ValueError("skip_steps must be provided when use_cfgzero_star=True (use 0 to disable skipping).")
+        skip_steps = 0
+    if isinstance(skip_steps, bool) or not isinstance(skip_steps, int) or skip_steps < 0:
+        raise ValueError("skip_steps must be a nonnegative integer.")
+    if skip_steps >= total_steps:
+        raise ValueError(f"skip_steps must be less than the total number of sampling steps ({total_steps}).")
+    return skip_steps
+
+
 class CFGDDPMSampler:
     """DDPM with cached text conditions and classifier-free guidance."""
 
@@ -439,6 +452,7 @@ class CFGDDPMSampler:
         self, model, betas, d_type=th.float32, device=device, loss_fn=None, *,
         guidance_scale=1.0, eval_max_length=77, text_encoder: CLIPTextEncoder | None = None,
         text_model_name="openai/clip-vit-base-patch32",
+        use_cfgzero_star=False, skip_steps=None,
     ):
         self.model = model
         self.device = th.device(device)
@@ -450,6 +464,8 @@ class CFGDDPMSampler:
         self._empty_conditions: dict[int, tuple[th.Tensor, th.Tensor]] = {}
         self.betas = to_tensor(betas, d_type, self.device)
         self.num_timesteps = len(self.betas)
+        self.use_cfgzero_star = use_cfgzero_star
+        self.skip_steps = validate_cfg_skip_steps(use_cfgzero_star, skip_steps, self.num_timesteps)
         self.alphas = 1 - self.betas
         self.alpha_bars = th.cumprod(self.alphas, dim=0)
         self.alpha_bars_prev = th.cat([th.ones_like(self.alpha_bars[:1]), self.alpha_bars[:-1]])
@@ -485,9 +501,20 @@ class CFGDDPMSampler:
         elif guidance_scale == 0:
             prediction = self.model(x_t, t, empty, empty_mask)
         else:
-            conditional = self.model(x_t, t, context, attention_mask)
-            unconditional = self.model(x_t, t, empty, empty_mask)
-            prediction = unconditional + guidance_scale * (conditional - unconditional)
+            conditional: th.Tensor = self.model(x_t, t, context, attention_mask)
+            unconditional: th.Tensor = self.model(x_t, t, empty, empty_mask)
+            if not self.use_cfgzero_star:
+                prediction = unconditional + guidance_scale * (conditional - unconditional)
+            else:
+                output_dtype = conditional.dtype
+                b, c, h, w = conditional.shape
+                conditional = conditional.reshape(b, -1).float()
+                unconditional = unconditional.reshape(b, -1).float()
+                numerator = (conditional * unconditional).sum(dim=1, keepdim=True)
+                denominator = unconditional.square().sum(dim=1, keepdim=True).clamp_min(1e-8)
+                adjust_scale = numerator / denominator
+                res: th.Tensor = (1 - guidance_scale) * adjust_scale * unconditional + guidance_scale * conditional
+                prediction = res.reshape(b, c, h, w).to(output_dtype)
         beta = self.betas[t].view(-1, 1, 1, 1)
         alpha = self.alphas[t].view(-1, 1, 1, 1)
         alpha_bar = self.alpha_bars[t].view(-1, 1, 1, 1)
@@ -498,7 +525,11 @@ class CFGDDPMSampler:
 
     @th.no_grad()
     def sample(self, x_T, prompts=None, guidance_scale=None, *, context=None, attention_mask=None):
-        """Sample from prompts, or reuse supplied context and attention_mask without encoding."""
+        """Sample from prompts or cached context, holding x_T fixed for the initial skip_steps.
+
+        Skipping is independent of CFG-Zero*. DDIM counts steps on its reduced
+        schedule; neither sampler renumbers model timesteps after skipping.
+        """
         x_t = x_T.to(self.device)
         if context is None:
             prompts = [prompts] * len(x_t) if isinstance(prompts, str) else list(prompts)
@@ -516,7 +547,7 @@ class CFGDDPMSampler:
         was_training = self.model.training
         self.model.eval()
         try:
-            for step in tqdm(range(self.num_timesteps - 1, -1, -1), desc="CFG sampling"):
+            for step in tqdm(range(self.num_timesteps - 1 - self.skip_steps, -1, -1), desc="CFG sampling"):
                 t = th.full((len(x_t),), step, dtype=th.long, device=self.device)
                 x_t, _ = self.p_sample(x_t, t, context, attention_mask, empty, empty_mask, scale)
         finally:
@@ -532,11 +563,13 @@ class CFGDDIMSampler(CFGDDPMSampler):
         device=device, loss_fn=None, *, guidance_scale=1.0, eval_max_length=77,
         text_encoder: CLIPTextEncoder | None = None,
         text_model_name="openai/clip-vit-base-patch32",
+        use_cfgzero_star=False, skip_steps=None,
     ):
         super().__init__(
             model, betas, d_type=d_type, device=device, loss_fn=loss_fn,
             guidance_scale=guidance_scale, eval_max_length=eval_max_length, text_encoder=text_encoder,
             text_model_name=text_model_name,
+            use_cfgzero_star=use_cfgzero_star, skip_steps=skip_steps,
         )
         self.spacing = spacing
         self.randomness = min(max(float(randomness), 0.0), 1.0)
@@ -550,6 +583,7 @@ class CFGDDIMSampler(CFGDDPMSampler):
         self.alphas = self.alpha_bars / self.alpha_bars_prev
         self.betas = 1 - self.alphas
         self.num_timesteps = len(self.ddim_timesteps)
+        self.skip_steps = validate_cfg_skip_steps(use_cfgzero_star, skip_steps, self.num_timesteps)
         self.sigmas = self.randomness * (self.betas * (1 - self.alpha_bars_prev) / (1 - self.alpha_bars)).sqrt()
 
     def get_loss(self, model, x_0, t, context, attention_mask):
@@ -568,9 +602,20 @@ class CFGDDIMSampler(CFGDDPMSampler):
         elif guidance_scale == 0:
             prediction = self.model(x_t, model_t, empty, empty_mask)
         else:
-            conditional = self.model(x_t, model_t, context, attention_mask)
-            unconditional = self.model(x_t, model_t, empty, empty_mask)
-            prediction = unconditional + guidance_scale * (conditional - unconditional)
+            conditional: th.Tensor = self.model(x_t, model_t, context, attention_mask)
+            unconditional: th.Tensor = self.model(x_t, model_t, empty, empty_mask)
+            if not self.use_cfgzero_star:
+                prediction = unconditional + guidance_scale * (conditional - unconditional)
+            else:
+                output_dtype = conditional.dtype
+                b, c, h, w = conditional.shape
+                conditional = conditional.reshape(b, -1).float()
+                unconditional = unconditional.reshape(b, -1).float()
+                numerator = (conditional * unconditional).sum(dim=1, keepdim=True)
+                denominator = unconditional.square().sum(dim=1, keepdim=True).clamp_min(1e-8)
+                adjust_scale = numerator / denominator
+                res: th.Tensor = (1 - guidance_scale) * adjust_scale * unconditional + guidance_scale * conditional
+                prediction = res.reshape(b, c, h, w).to(output_dtype)
         alpha = self.alphas[t].view(-1, 1, 1, 1)
         alpha_bar = self.alpha_bars[t].view(-1, 1, 1, 1)
         alpha_bar_prev = self.alpha_bars_prev[t].view(-1, 1, 1, 1)
@@ -585,7 +630,7 @@ class CFGFMSampler:
 
     def __init__(
         self, step, model, device, randomness=0.0, loss_fn=th.nn.MSELoss(), *, guidance_scale=1.0, eval_max_length=77,
-        use_cfgzero_star=False, skip_steps=0,
+        use_cfgzero_star=False, skip_steps=None,
         text_encoder: CLIPTextEncoder | None = None,
         text_model_name="openai/clip-vit-base-patch32",
         solver: Literal['euler'] = 'euler',
@@ -598,10 +643,7 @@ class CFGFMSampler:
             raise ValueError("solver must be 'euler'.")
         self.solver = solver
         self.sample_nums = math.ceil(1 / self.h)
-        if not isinstance(skip_steps, int) or skip_steps < 0:
-            raise ValueError("skip_steps must be a nonnegative integer.")
-        if use_cfgzero_star and skip_steps >= self.sample_nums:
-            raise ValueError("skip_steps must be less than the total number of FM steps.")
+        skip_steps = validate_cfg_skip_steps(use_cfgzero_star, skip_steps, self.sample_nums)
         self.model = model
         self.device = th.device(device)
         self.loss_fn = th.nn.MSELoss() if loss_fn is None else loss_fn
@@ -639,7 +681,7 @@ class CFGFMSampler:
 
     @th.no_grad()
     def sample(self, x_0, prompts=None, guidance_scale=None, *, context=None, attention_mask=None):
-        """Integrate CFG velocities using prompts or precomputed context and attention_mask."""
+        """Integrate CFG velocities, holding noise fixed for skip_steps with or without CFG-Zero*."""
         x_t = x_0.to(self.device)
         if context is None:
             prompts = [prompts] * len(x_t) if isinstance(prompts, str) else list(prompts)
@@ -678,8 +720,7 @@ class CFGFMSampler:
             return res.reshape(b, c, h, w).to(output_dtype)
         try:
             # Keep the initial state fixed during zero-init, retaining the original time grid.
-            start_step = self.skip_steps if self.use_cfgzero_star else 0
-            for index in tqdm(range(start_step, self.sample_nums), desc="CFG sampling"):
+            for index in tqdm(range(self.skip_steps, self.sample_nums), desc="CFG sampling"):
                 t = index * self.h
                 step_size = min(self.h, 1 - t)
                 x_t = _step(velocity, x_t, t, step_size, self.solver, self.randomness)
