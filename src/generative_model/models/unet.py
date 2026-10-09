@@ -4,7 +4,7 @@ import torch as th
 from torch import nn
 from torch.nn import functional as F
 
-from .attention import AttentionBlock, CrossAttentionBlock
+from .attention_legacy import AttentionBlock, CrossAttentionBlock
 from .utils import position_embedding, zero_init
 
 
@@ -142,7 +142,8 @@ class UNet(nn.Module):
             num_class = None,
             dtype=th.float32,
             image_size=32,
-            use_conv=False
+            use_conv=False,
+            attn_o_proj_zeroinit=False
     ):
         super().__init__()
         if not ch_mult:
@@ -165,6 +166,7 @@ class UNet(nn.Module):
         self.num_class = num_class
         self.dtype = dtype
         self.use_conv = use_conv
+        self.attn_o_proj_zeroinit = attn_o_proj_zeroinit
         downsample_scale_factor = 1
         if num_class:
             self.class_emb_layer = nn.Embedding(num_class, embedding_channel)
@@ -190,7 +192,8 @@ class UNet(nn.Module):
                 if image_size // downsample_scale_factor in attention_resolution:
                     attention_block = AttentionBlock(
                         cur_ch,
-                        num_heads
+                        num_heads,
+                        o_proj_zeroinit=attn_o_proj_zeroinit
                     )
                     layers.append(attention_block)
                 self.encoder.append(TimeSequentialBlock(*layers))
@@ -222,7 +225,8 @@ class UNet(nn.Module):
             ),
             AttentionBlock(
                 cur_ch,
-                num_heads
+                num_heads,
+                o_proj_zeroinit=attn_o_proj_zeroinit
             ),
             TimeEmbeddedResidualBlock(
                 cur_ch,
@@ -252,7 +256,8 @@ class UNet(nn.Module):
                     layers.append(
                         AttentionBlock(
                             cur_ch,
-                            num_heads
+                            num_heads,
+                            o_proj_zeroinit=attn_o_proj_zeroinit
                         )
                     )
                 if level and i == resblock_num:
@@ -320,7 +325,8 @@ class CFGUNet(nn.Module):
             num_heads = 1,
             dtype=th.float32,
             image_size=32,
-            use_conv=False
+            use_conv=False,
+            attn_o_proj_zeroinit=False
     ):
         super().__init__()
         if not ch_mult:
@@ -343,6 +349,7 @@ class CFGUNet(nn.Module):
         self.num_heads = num_heads
         self.dtype = dtype
         self.use_conv = use_conv
+        self.attn_o_proj_zeroinit = attn_o_proj_zeroinit
         downsample_scale_factor = 1
 
         # Encoder Part
@@ -366,13 +373,15 @@ class CFGUNet(nn.Module):
                 if image_size // downsample_scale_factor in attention_resolution:
                     attention_block = AttentionBlock(
                         cur_ch,
-                        num_heads
+                        num_heads,
+                        o_proj_zeroinit=attn_o_proj_zeroinit
                     )
                     layers.append(attention_block)
                     cross_attention_block = CrossAttentionBlock(
                         cur_ch,
                         feature_channel,
-                        num_heads
+                        num_heads,
+                        o_proj_zeroinit=attn_o_proj_zeroinit
                     )
                     layers.append(cross_attention_block)
                 self.encoder.append(TimeSequentialBlock(*layers))
@@ -404,12 +413,14 @@ class CFGUNet(nn.Module):
             ),
             AttentionBlock(
                 cur_ch,
-                num_heads
+                num_heads,
+                o_proj_zeroinit=attn_o_proj_zeroinit
             ),
             CrossAttentionBlock(
                 cur_ch,
                 feature_channel,
-                num_heads
+                num_heads,
+                o_proj_zeroinit=attn_o_proj_zeroinit
             ),
             TimeEmbeddedResidualBlock(
                 cur_ch,
@@ -439,14 +450,16 @@ class CFGUNet(nn.Module):
                     layers.append(
                         AttentionBlock(
                             cur_ch,
-                            num_heads
+                            num_heads,
+                            o_proj_zeroinit=attn_o_proj_zeroinit
                         )
                     )
                     layers.append(
                         CrossAttentionBlock(
                             cur_ch,
                             feature_channel,
-                            num_heads
+                            num_heads,
+                            o_proj_zeroinit=attn_o_proj_zeroinit
                         )
                     )
                 if level and i == resblock_num:

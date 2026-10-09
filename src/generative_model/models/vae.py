@@ -69,6 +69,7 @@ class Encoder(nn.Module):
             ch_mult=(1, 2, 3, 4),
             attention_resolution=(16, 8, 4),
             num_heads=1,
+            attn_o_proj_zeroinit=False,
             image_size=32,
             use_conv=False
     ):
@@ -82,6 +83,7 @@ class Encoder(nn.Module):
         self.resblock_num = resblock_num
         self.dropout = dropout
         self.num_heads = num_heads
+        self.attn_o_proj_zeroinit = attn_o_proj_zeroinit
         self.use_conv = use_conv
         downsample_scale_factor = 1
 
@@ -105,7 +107,8 @@ class Encoder(nn.Module):
                 if image_size // downsample_scale_factor in attention_resolution:
                     attention_block = AttentionBlock(
                         cur_ch,
-                        num_heads
+                        num_heads,
+                        attn_o_proj_zeroinit
                     )
                     layers.append(attention_block)
                 self.encoder.append(nn.Sequential(*layers))
@@ -134,7 +137,8 @@ class Encoder(nn.Module):
             ),
             AttentionBlock(
                 cur_ch,
-                num_heads
+                num_heads,
+                attn_o_proj_zeroinit
             ),
             ResidualBlock(
                 cur_ch,
@@ -165,6 +169,7 @@ class Decoder(nn.Module):
             ch_mult=(1, 2, 3, 4),
             attention_resolution=(16, 8, 4),
             num_heads=1,
+            attn_o_proj_zeroinit=False,
             image_size=32,
             use_conv=False
     ):
@@ -179,6 +184,7 @@ class Decoder(nn.Module):
         self.dropout = dropout
         self.num_heads = num_heads
         self.use_conv = use_conv
+        self.attn_o_proj_zeroinit = attn_o_proj_zeroinit
         downsample_scale_factor = 2 ** (len(ch_mult) - 1)
         cur_ch = model_channel * ch_mult[-1]
 
@@ -192,7 +198,8 @@ class Decoder(nn.Module):
             ),
             AttentionBlock(
                 cur_ch,
-                num_heads
+                num_heads,
+                attn_o_proj_zeroinit
             ),
             ResidualBlock(
                 cur_ch,
@@ -219,7 +226,8 @@ class Decoder(nn.Module):
                     layers.append(
                         AttentionBlock(
                             cur_ch,
-                            num_heads
+                            num_heads,
+                            attn_o_proj_zeroinit
                         )
                     )
                 if level and i == resblock_num:
@@ -255,6 +263,7 @@ class VariationalAutoEncoder(nn.Module):
             ch_mult=(1, 2, 3, 4),
             attention_resolution=(16, 8, 4),
             num_heads=1,
+            attn_o_proj_zeroinit=False,
             image_size=32,
             use_conv=False
     ):
@@ -289,6 +298,7 @@ class VariationalAutoEncoder(nn.Module):
             ch_mult,
             attention_resolution,
             num_heads,
+            attn_o_proj_zeroinit,
             image_size,
             use_conv
         )
@@ -306,6 +316,7 @@ class VariationalAutoEncoder(nn.Module):
             ch_mult,
             attention_resolution,
             num_heads,
+            attn_o_proj_zeroinit,
             image_size,
             use_conv
         )
