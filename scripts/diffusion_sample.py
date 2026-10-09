@@ -12,7 +12,7 @@ from PIL import Image
 import torch
 
 from generative_model.logger import get_logger
-from generative_model.model import UNet
+from generative_model.models.unet import UNet
 from generative_model.sampler import DDIMSampler, DDPMSampler, FMSampler, display_image_uint8, make_beta_schedule
 
 logger = get_logger('generative_model.sample')

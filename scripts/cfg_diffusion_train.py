@@ -15,7 +15,7 @@ import torch
 
 from generative_model.config import TrainerConfig
 from generative_model.load_dataset import getCifarCLIPLoader
-from generative_model.model import CFGUNet
+from generative_model.models.unet import CFGUNet
 from generative_model.sampler import CFGDDPMSampler, CFGFMSampler, FMTimestepSampler, TimestepSampler, make_beta_schedule
 from generative_model.trainer import CFGTrainer
 from generative_model.text_encoder import CLIPTextEncoder

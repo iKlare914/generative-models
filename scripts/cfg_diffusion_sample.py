@@ -13,7 +13,7 @@ import textwrap
 import numpy as np
 import torch
 
-from generative_model.model import CFGUNet
+from generative_model.models.unet import CFGUNet
 from generative_model.sampler import CFGDDIMSampler, CFGDDPMSampler, CFGFMSampler, display_image_uint8, make_beta_schedule
 from generative_model.text_encoder import CLIPTextEncoder, get_cifar10_prompt
 
