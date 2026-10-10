@@ -1,22 +1,41 @@
 import torch as th
 from torch import nn
-
+import torch.nn.functional as F
 from .utils import zero_init
-
+from typing import Literal
+from generative_model.models.norms import AdaptiveLayerNorm
 
 class QKVMHAttention(nn.Module):
     def __init__(self, num_heads = 1):
         super().__init__()
         self.num_heads = num_heads
 
-    def forward(self, qkv: th.Tensor):
+    def forward(self, q: th.Tensor, k: th.Tensor, v: th.Tensor):
         """
         Args:
-            qkv: Tensor [B, C, (H*W)]
+            q, k, v: Tensor [B, L, C]
         Returns:
-            attention: Tensor [B, C, (H*W)]
+            attention: Tensor [B, L, C]
         """
-        raise NotImplementedError("Implement the new attention forward pass.")
+        b, l, c = q.shape
+        h = self.num_heads
+        if c % h != 0:
+            raise ValueError(f"Channel num: {c} must can be divided by num heads: {h}")
+        hc = c // h 
+        
+        q = q.reshape(b, l, h, hc).transpose(1, 2) # [B, H, L, HC]
+        k = k.reshape(b, l, h, hc).transpose(1, 2)
+        v = v.reshape(b, l, h, hc).transpose(1, 2)
+
+        # spda kernel fusion requires last dim with stride 1
+        q, k, v = (
+            o.contiguous() if o.stride(-1) != 1 else o
+            for o in (q, k, v)
+        )
+
+        attn = F.scaled_dot_product_attention(q, k, v)
+        attn = attn.transpose(1, 2).reshape(b, l, -1) # [B, L, C]
+        return attn
 
 
 class QKVMHACrossAttention(nn.Module):
@@ -27,18 +46,35 @@ class QKVMHACrossAttention(nn.Module):
     def forward(self, q: th.Tensor, k: th.Tensor, v: th.Tensor, attention_mask: th.Tensor):
         """
         Args:
-            q: Tensor [B, C, (H*W)]
+            q: Tensor [B, S, C]
             k: Tensor [B, L, C]
             v: Tensor [B, L, C]
             attention_mask: 0-1 Tensor [B, L]
         Returns:
-            attention: Tensor [B, C, (H*W)]
+            attention: Tensor [B, S, C]
         """
-        raise NotImplementedError("Implement the new attention forward pass.")
+        s, l = q.shape[-2], k.shape[-2]
+        b, c = q.shape[0], q.shape[-1]
+        h = self.num_heads
+        if c % h != 0:
+            raise ValueError(f"Channel num: {c} must can be divided by num heads: {h}")
+        hc = c // h
+        q = q.reshape(b, s, h, hc).transpose(1, 2) # [B, H, S, HC]
+        k = k.reshape(b, l, h, hc).transpose(1, 2)
+        v = v.reshape(b, l, h, hc).transpose(1, 2)
+        mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()
 
+        # spda kernel fusion requires last dim with stride 1
+        q, k, v = (
+            o.contiguous() if o.stride(-1) != 1 else o
+            for o in (q, k, v)
+        )
 
-class AttentionBlock(nn.Module):
-    def __init__(self, channel, num_heads = 1, o_proj_zeroinit=False):
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=mask) # [B, H, S, HC]
+        return attn.transpose(1, 2).reshape(b, s, -1)
+
+class ConvAttentionBlock(nn.Module):
+    def __init__(self, channel, num_heads=1, o_proj_zeroinit=False):
         super().__init__()
         self.channel = channel
         self.num_heads = num_heads
@@ -54,10 +90,20 @@ class AttentionBlock(nn.Module):
         Returns: 
             result: Tensor [B, C, H, W]
         """
-        raise NotImplementedError("Implement the new attention forward pass.")
+        b, c, h, w = x.shape
+        x = x.reshape(b, c, -1)
+        q, k ,v = self.qkv_proj(self.norm(x)).chunk(3, dim=1)
+        q = q.transpose(1, 2) # [B, (H*W)], C]
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        attn: th.Tensor = self.attention(q, k, v) # [B, (H*W), C]
+        o = self.o_proj(attn.transpose(1, 2))
+        return (o + x).reshape(b, c, h, w)
 
 
-class CrossAttentionBlock(nn.Module):
+
+class ConvCrossAttentionBlock(nn.Module):
     def __init__(self, channel, feature_channel, num_heads = 1, o_proj_zeroinit=False):
         super().__init__()
         self.channel = channel
@@ -74,9 +120,19 @@ class CrossAttentionBlock(nn.Module):
         """
         Args:
             x: Tensor [B, C, H, W]
-            context: Tensor [B, L, C]
+            context: Tensor [B, L, FC]
             attention_mask: 0-1 Tensor [B, L]
         Returns:
             result: Tensor [B, C, H, W]
         """
-        raise NotImplementedError("Implement the new attention forward pass.")
+        b, c, h, w = x.shape
+        x = x.reshape(b, c, -1)
+        q = self.q_proj(self.norm(x)).transpose(1, 2) # [B, S, C]
+        k = self.k_proj(context) # [B, L ,C]
+        v = self.v_proj(context)
+
+        attn: th.Tensor = self.attention(q, k, v, attention_mask) # [B, S, C]
+        o = self.o_proj(attn.transpose(1, 2))
+        return (x + o).reshape(b, c, h, w)
+
+

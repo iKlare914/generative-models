@@ -1,7 +1,7 @@
 import torch as th
 from torch import nn
 
-from .attention import AttentionBlock
+from .attention import ConvAttentionBlock
 from .unet import DownSampleBlock, UpSampleBlock
 from .utils import zero_init
 
@@ -105,7 +105,7 @@ class Encoder(nn.Module):
                 cur_ch = int(model_channel * mult)
                 layers.append(resblock)
                 if image_size // downsample_scale_factor in attention_resolution:
-                    attention_block = AttentionBlock(
+                    attention_block = ConvAttentionBlock(
                         cur_ch,
                         num_heads,
                         attn_o_proj_zeroinit
@@ -135,7 +135,7 @@ class Encoder(nn.Module):
                 dropout,
                 use_conv=use_conv
             ),
-            AttentionBlock(
+            ConvAttentionBlock(
                 cur_ch,
                 num_heads,
                 attn_o_proj_zeroinit
@@ -196,7 +196,7 @@ class Decoder(nn.Module):
                 dropout,
                 use_conv=use_conv
             ),
-            AttentionBlock(
+            ConvAttentionBlock(
                 cur_ch,
                 num_heads,
                 attn_o_proj_zeroinit
@@ -224,7 +224,7 @@ class Decoder(nn.Module):
                 cur_ch = int(model_channel * mult)
                 if image_size // downsample_scale_factor in attention_resolution:
                     layers.append(
-                        AttentionBlock(
+                        ConvAttentionBlock(
                             cur_ch,
                             num_heads,
                             attn_o_proj_zeroinit
