@@ -4,7 +4,7 @@ from tqdm.auto import tqdm
 from generative_model.logger import get_logger
 from typing import Literal
 import numpy as np
-from generative_model.text_encoder import CLIPTextEncoder
+from generative_model.dataset.text_encoder import CLIPTextEncoder
 
 logger = get_logger(__name__)
 

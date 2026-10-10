@@ -3,7 +3,7 @@ from generative_model.logger import get_logger
 from generative_model.sampler import DDIMSampler, DDPMSampler, TimestepSampler, display_image_uint8, FMSampler, FMTimestepSampler
 from generative_model.sampler import CFGDDPMSampler, CFGDDIMSampler, CFGFMSampler
 from generative_model.config import TrainerConfig
-from generative_model.text_encoder import get_cifar10_prompt
+from generative_model.dataset.text_encoder import get_cifar10_prompt
 from uuid import uuid4
 from abc import ABC, abstractmethod
 from copy import deepcopy

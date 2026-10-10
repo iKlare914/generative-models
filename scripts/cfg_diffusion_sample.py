@@ -16,7 +16,7 @@ import torch
 from generative_model.cli_config import parse_args_with_config
 from generative_model.models.unet import CFGUNet
 from generative_model.sampler import CFGDDIMSampler, CFGDDPMSampler, CFGFMSampler, display_image_uint8, make_beta_schedule, validate_cfg_skip_steps
-from generative_model.text_encoder import CLIPTextEncoder, get_cifar10_prompt
+from generative_model.dataset.text_encoder import CLIPTextEncoder, get_cifar10_prompt
 
 
 def positive_int(value):

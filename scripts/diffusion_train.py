@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from generative_model.config import TrainerConfig
-from generative_model.load_dataset import getCifarLoader
+from generative_model.dataset.load_dataset import getCifarLoader
 from generative_model.cli_config import parse_args_with_config
 from generative_model.models.unet import UNet
 from generative_model.sampler import DDPMSampler, FMSampler, FMTimestepSampler, TimestepSampler, make_beta_schedule
