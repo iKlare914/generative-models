@@ -54,6 +54,7 @@ def resize_image_dataset(
     dataset: Dataset,
     resize: tuple[int, int],
     save_dir: str | Path | None = None,
+    num_proc: int = 2,
     *,
     repo_name: str | None = None,
     split: str | None = None,
@@ -102,7 +103,7 @@ def resize_image_dataset(
 
     resized = dataset.map(
         transform, batched=True, batch_size=32, writer_batch_size=32,
-        desc=f"Resize images to {height}x{width}",
+        desc=f"Resize images to {height}x{width}", num_proc=num_proc
     )
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     resized.save_to_disk(output_dir)
