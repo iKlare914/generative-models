@@ -68,8 +68,8 @@ class CLIPTextEncoder:
                 missing, padding="max_length", truncation=True, max_length=max_length,
                 add_special_tokens=True, return_attention_mask=True, return_tensors="pt",
             ).to("cpu")
-            hidden = self.model(**inputs).last_hidden_state
-            mask = inputs["attention_mask"].bool()
+            hidden = self.model(**inputs).last_hidden_state # [B. L. D]
+            mask = inputs["attention_mask"].bool() # [B, L]
             if not mask.any(dim=-1).all():
                 raise ValueError("Text conditioning must contain at least one valid token.")
             for index, prompt in enumerate(missing):

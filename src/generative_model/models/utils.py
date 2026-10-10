@@ -35,3 +35,9 @@ def position_embedding(x: th.Tensor, emb_dim: int):
         dim=-1
     )
     return emb
+
+def ada_modulation(x: th.Tensor, scale: th.Tensor, shift: th.Tensor) -> th.Tensor:
+    """
+    Apply AdaLN modulation except for attention/ffn gating
+    """
+    return (1 + scale) * x + shift
