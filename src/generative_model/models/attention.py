@@ -4,6 +4,80 @@ import torch.nn.functional as F
 from .utils import zero_init
 from typing import Literal
 from generative_model.models.norms import AdaptiveLayerNorm
+from generative_model.models.embedding import RoPE2D, getSinusoidalEmbedding2D
+
+class QKVMHAttentionRoPE2D(nn.Module):
+    def __init__(self, grid_size_h, grid_size_w, rope_theta=10000.0, num_heads = 1):
+        super().__init__()
+        self.num_heads = num_heads
+        self.rope = RoPE2D(grid_size_h, grid_size_w, rope_theta)
+
+    def forward(self, q: th.Tensor, k: th.Tensor, v: th.Tensor):
+        """
+        Args:
+            q, k, v: Tensor [B, L, C]
+        Returns:
+            attention: Tensor [B, L, C]
+        """
+        b, l, c = q.shape
+        h = self.num_heads
+        if c % h != 0:
+            raise ValueError(f"Channel num: {c} must can be divided by num heads: {h}")
+        hc = c // h 
+        
+        q = self.rope(q.reshape(b, l, h, hc).transpose(1, 2)) # [B, H, L, HC]
+        k = self.rope(k.reshape(b, l, h, hc).transpose(1, 2))
+        v = v.reshape(b, l, h, hc).transpose(1, 2)
+
+        # spda kernel fusion requires last dim with stride 1
+        q, k, v = (
+            o.contiguous() if o.stride(-1) != 1 else o
+            for o in (q, k, v)
+        )
+
+        attn = F.scaled_dot_product_attention(q, k, v)
+        attn = attn.transpose(1, 2).reshape(b, l, -1) # [B, L, C]
+        return attn
+
+
+class QKVMHACrossAttentionRope2D(nn.Module):
+    def __init__(self, grid_size_h, grid_size_w, rope_theta=10000.0, num_heads = 1):
+        super().__init__()
+        self.num_heads = num_heads
+        self.rope = RoPE2D(grid_size_h, grid_size_w, rope_theta)
+
+    def forward(self, q: th.Tensor, k: th.Tensor, v: th.Tensor, attention_mask: th.Tensor):
+        """
+        Args:
+            q: Tensor [B, S, C]
+            k: Tensor [B, L, C]
+            v: Tensor [B, L, C]
+            attention_mask: 0-1 Tensor [B, L]
+        Returns:
+            attention: Tensor [B, S, C]
+        """
+        s, l = q.shape[-2], k.shape[-2]
+        b, c = q.shape[0], q.shape[-1]
+        h = self.num_heads
+        if c % h != 0:
+            raise ValueError(f"Channel num: {c} must can be divided by num heads: {h}")
+        hc = c // h
+
+        # ref: https://github.com/Tencent-Hunyuan/HunyuanDiT/blob/cb709308d92e6c7e8d59d0dff41b74d35088db6a/hydit/modules/attn_layers.py#L301-L305
+        # Use RoPE only for q (Image) in Cross attention
+        q = self.rope(q.reshape(b, s, h, hc).transpose(1, 2)) # [B, H, S, HC]
+        k = k.reshape(b, l, h, hc).transpose(1, 2)
+        v = v.reshape(b, l, h, hc).transpose(1, 2)
+        mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()
+
+        # spda kernel fusion requires last dim with stride 1
+        q, k, v = (
+            o.contiguous() if o.stride(-1) != 1 else o
+            for o in (q, k, v)
+        )
+
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=mask) # [B, H, S, HC]
+        return attn.transpose(1, 2).reshape(b, s, -1)
 
 class QKVMHAttention(nn.Module):
     def __init__(self, num_heads = 1):
