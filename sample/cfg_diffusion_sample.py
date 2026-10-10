@@ -1,8 +1,8 @@
 """Show nine prompted CFG samples and three empty-prompt samples in separate 4x3 subplots.
 
 Examples:
-    python scripts/cfg_diffusion_sample.py --model-path checkpoint.pt --image-size 32 --sample ddim
-    python scripts/cfg_diffusion_sample.py --random-init --image-size 32 --sample fm --fm-step 1 --output-path cfg-smoke.png
+    python sample/cfg_diffusion_sample.py --model-path checkpoint.pt --image-size 32 --sample ddim
+    python sample/cfg_diffusion_sample.py --random-init --image-size 32 --sample fm --fm-step 1 --output-path cfg-smoke.png
 """
 
 import argparse

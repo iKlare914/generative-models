@@ -1,4 +1,4 @@
-# Entry point: scripts/diffusion_train.py
+# Entry point: train/diffusion_train.py
 # Relative file paths are resolved from this YAML directory. CLI options override YAML.
 # EMA decay was not specified in the old shell launcher; 0.9999 is an editable starting value.
 image_size: 1024

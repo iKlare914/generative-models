@@ -2,6 +2,7 @@
 
 训练配置放在 `config/train/`，采样配置放在 `config/test/`。每个原有 `.sh`
 启动脚本都有一个同名 YAML；脚本只负责选择 Python 入口和配置路径。
+训练 Python 入口放在项目根目录的 `train/`，采样入口放在 `sample/`。
 
 ## 启动
 
@@ -18,7 +19,7 @@ bash scripts/cfg-fm-run.sh --batch-size 64 --no-use-torch-compile
 bash scripts/run.sh --config config/train/my-experiment.yaml
 
 # 直接用 Python 入口读取 YAML
-uv run --no-sync python scripts/diffusion_train.py --config config/train/fm-run.yaml
+uv run --no-sync python train/diffusion_train.py --config config/train/fm-run.yaml
 
 # 指定采样权重和输出图片
 bash scripts/fm-run-sample.sh --model-path checkpoints/model.pt --output-path outputs/fm.png

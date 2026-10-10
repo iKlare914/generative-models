@@ -1,4 +1,4 @@
-# Entry point: scripts/diffusion_sample.py
+# Entry point: sample/diffusion_sample.py
 # Relative file paths are resolved from this YAML directory. CLI options override YAML.
 model_path: ../../checkpoints/cifar10-20260925-1/00000768_00010.136794_checkpoint.pt
 output_path: null

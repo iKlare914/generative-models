@@ -1,4 +1,4 @@
-# Entry point: scripts/cfg_diffusion_sample.py
+# Entry point: sample/cfg_diffusion_sample.py
 # Relative file paths are resolved from this YAML directory. CLI options override YAML.
 # Set model_path (or random_init: true for CFG smoke tests) before sampling.
 model_path: null

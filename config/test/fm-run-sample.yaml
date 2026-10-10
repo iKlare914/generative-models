@@ -1,4 +1,4 @@
-# Entry point: scripts/diffusion_sample.py
+# Entry point: sample/diffusion_sample.py
 # Relative file paths are resolved from this YAML directory. CLI options override YAML.
 # Set model_path before sampling; this entry point requires a checkpoint.
 model_path: null

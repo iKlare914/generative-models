@@ -1,7 +1,7 @@
 """Sample nine RGB images and display a 3x3 PIL grid or save it to --output-path.
 
 Example:
-    python scripts/diffusion_sample.py --model-path checkpoint.pt --image-size 32 --sample ddim
+    python sample/diffusion_sample.py --model-path checkpoint.pt --image-size 32 --sample ddim
 """
 
 import argparse
