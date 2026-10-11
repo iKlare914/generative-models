@@ -4,12 +4,13 @@ from generative_model.models.utils import position_embedding
 import math
 
 class TimeStepEmbedder(nn.Module):
-    def __init__(self, freq_dim, hidden_dim):
+    def __init__(self, t_dim, hidden_dim, freq):
         super().__init__()
-        self.freq_dim = freq_dim
+        self.t_dim = t_dim
         self.hidden_dim = hidden_dim
+        self.freq = freq
         self.out = nn.Sequential(
-            nn.Linear(freq_dim, hidden_dim),
+            nn.Linear(t_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
@@ -22,7 +23,7 @@ class TimeStepEmbedder(nn.Module):
         Returns:
             Tensor [B, hidden_dim]
         """
-        x = position_embedding(x, self.freq_dim)
+        x = position_embedding(x, self.t_dim, self.freq)
         return self.out(x)
 
 class RoPE2D(nn.Module):
@@ -104,9 +105,26 @@ class RoPE2D(nn.Module):
         
         return th.concat((gh_rope, gw_rope), dim=-1).type(dtype)
 
+class PatchEmbedding(nn.Module):
+    def __init__(self, in_channel: int, out_channel: int, shape: tuple[int, int] | list[int], patch_size: int):
+        super().__init__()
+        self.proj = nn.Conv2d(in_channel, out_channel, kernel_size=patch_size, stride=patch_size)
+        self.patch_size = patch_size
+
+    def forward(self, x: th.Tensor):
+        """
+        Args:
+            x: Tensor [B, C, H, W]
+        Returns:
+            out: Tensor [B, H*W/p**2, D]
+        """
+        assert x.size(-1) % self.patch_size == 0 and x.size(-2) % self.patch_size == 0
+        x = self.proj(x) # [B, D, H/p, W/p]
+        b, d, h, w = x.shape
+        return x.reshape(b, d, -1).transpose(1, 2).contiguous()
 
 
-def getSinusoidalEmbedding2D(freq_dim: int, grid_size_h: int, grid_size_w: int) -> th.Tensor:
+def getSinusoidalEmbedding2D(freq: float, freq_dim: int, grid_size_h: int, grid_size_w: int) -> th.Tensor:
     """
         Apply axial sinusoidal embedding for 2D
         Args:
@@ -119,8 +137,8 @@ def getSinusoidalEmbedding2D(freq_dim: int, grid_size_h: int, grid_size_w: int) 
     if not isinstance(freq_dim, int) or freq_dim <= 0 or freq_dim % 4 != 0:
         raise ValueError(f"freq_dim must be a positive integer divisible by 4, but got {freq_dim}")
     gh, gw = th.meshgrid(th.arange(grid_size_h), th.arange(grid_size_w), indexing="ij") # [grid_size_h, grid_size_w]
-    gh_emb = position_embedding(gh.reshape(-1), freq_dim // 2) # [grid_size_h * grid_size_w, freq_dim // 2]
-    gw_emb = position_embedding(gw.reshape(-1), freq_dim // 2)
+    gh_emb = position_embedding(gh.reshape(-1), freq_dim // 2, freq) # [grid_size_h * grid_size_w, freq_dim // 2]
+    gw_emb = position_embedding(gw.reshape(-1), freq_dim // 2, freq)
     return th.cat([gw_emb, gh_emb], dim=-1).unsqueeze(0) # [1, grid_size_h * grid_size_w, freq_dim]
 
 

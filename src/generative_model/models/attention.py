@@ -7,7 +7,7 @@ from generative_model.models.norms import AdaptiveLayerNorm
 from generative_model.models.embedding import RoPE2D, getSinusoidalEmbedding2D
 
 class QKVMHAttentionRoPE2D(nn.Module):
-    def __init__(self, grid_size_h, grid_size_w, rope_theta=10000.0, num_heads = 1):
+    def __init__(self, grid_size_h: int, grid_size_w: int, rope_theta: float = 10000.0, num_heads: int = 1):
         super().__init__()
         self.num_heads = num_heads
         self.rope = RoPE2D(grid_size_h, grid_size_w, rope_theta)
@@ -40,11 +40,13 @@ class QKVMHAttentionRoPE2D(nn.Module):
         return attn
 
 
-class QKVMHACrossAttentionRope2D(nn.Module):
-    def __init__(self, grid_size_h, grid_size_w, rope_theta=10000.0, num_heads = 1):
+class QKVMHACrossAttentionRoPE2D(nn.Module):
+    def __init__(self, grid_size_h: int, grid_size_w: int, rope_theta: float = 10000.0, num_heads:int = 1, *, cross_rope_q: bool =False, cross_rope_k: bool=False):
         super().__init__()
         self.num_heads = num_heads
         self.rope = RoPE2D(grid_size_h, grid_size_w, rope_theta)
+        self.cross_rope_q = cross_rope_q
+        self.cross_rope_k = cross_rope_k
 
     def forward(self, q: th.Tensor, k: th.Tensor, v: th.Tensor, attention_mask: th.Tensor):
         """
@@ -65,8 +67,10 @@ class QKVMHACrossAttentionRope2D(nn.Module):
 
         # ref: https://github.com/Tencent-Hunyuan/HunyuanDiT/blob/cb709308d92e6c7e8d59d0dff41b74d35088db6a/hydit/modules/attn_layers.py#L301-L305
         # Use RoPE only for q (Image) in Cross attention
-        q = self.rope(q.reshape(b, s, h, hc).transpose(1, 2)) # [B, H, S, HC]
-        k = k.reshape(b, l, h, hc).transpose(1, 2)
+        # if k has the same modality as q, then apply RoPE for it
+
+        q = self.rope(q.reshape(b, s, h, hc).transpose(1, 2)) if self.cross_rope_q else q.reshape(b, s, h, hc).transpose(1, 2) # [B, H, S, HC]
+        k = self.rope(k.reshape(b, l, h, hc).transpose(1, 2)) if self.cross_rope_k else k.reshape(b, l, h, hc).transpose(1, 2)
         v = v.reshape(b, l, h, hc).transpose(1, 2)
         mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()
 
@@ -80,7 +84,7 @@ class QKVMHACrossAttentionRope2D(nn.Module):
         return attn.transpose(1, 2).reshape(b, s, -1)
 
 class QKVMHAttention(nn.Module):
-    def __init__(self, num_heads = 1):
+    def __init__(self, num_heads: int = 1):
         super().__init__()
         self.num_heads = num_heads
 
@@ -111,9 +115,8 @@ class QKVMHAttention(nn.Module):
         attn = attn.transpose(1, 2).reshape(b, l, -1) # [B, L, C]
         return attn
 
-
 class QKVMHACrossAttention(nn.Module):
-    def __init__(self, num_heads = 1):
+    def __init__(self, num_heads:int = 1):
         super().__init__()
         self.num_heads = num_heads
 
@@ -146,6 +149,101 @@ class QKVMHACrossAttention(nn.Module):
 
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=mask) # [B, H, S, HC]
         return attn.transpose(1, 2).reshape(b, s, -1)
+
+class AttentionBlock(nn.Module):
+    """Projected self-attention; normalization and residuals belong to the caller."""
+
+    def __init__(self, d_model: int, num_heads: int = 1):
+        super().__init__()
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.o_proj = nn.Linear(d_model, d_model)
+        self.attention = QKVMHAttention(num_heads=num_heads)
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        """Map x [B, L, d_model] to [B, L, d_model]."""
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+        return self.o_proj(self.attention(q, k, v))
+
+
+class AttentionBlockRoPE2D(nn.Module):
+    """Projected self-attention with 2D RoPE on Q and K."""
+
+    def __init__(self, d_model: int, grid_size_h: int, grid_size_w: int,
+                 rope_theta: float = 10000.0, num_heads: int = 1):
+        super().__init__()
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.o_proj = nn.Linear(d_model, d_model)
+        self.attention = QKVMHAttentionRoPE2D(
+            grid_size_h=grid_size_h, grid_size_w=grid_size_w,
+            rope_theta=rope_theta, num_heads=num_heads,
+        )
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        """Map x [B, grid_size_h * grid_size_w, d_model] to the same shape."""
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+        return self.o_proj(self.attention(q, k, v))
+
+
+class CrossAttentionBlock(nn.Module):
+    """Projected cross-attention; normalization and residuals belong to the caller."""
+
+    def __init__(self, d_model: int, d_feature: int, num_heads: int = 1):
+        super().__init__()
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_feature, d_model)
+        self.v_proj = nn.Linear(d_feature, d_model)
+        self.o_proj = nn.Linear(d_model, d_model)
+        self.attention = QKVMHACrossAttention(num_heads=num_heads)
+
+    def forward(self, x: th.Tensor, feature: th.Tensor, attention_mask: th.Tensor) -> th.Tensor:
+        """x: [B, S, d_model]; feature: [B, L, d_feature]; mask: [B, L], 1 = valid.
+
+        Returns [B, S, d_model].
+        """
+        q = self.q_proj(x)
+        k = self.k_proj(feature)
+        v = self.v_proj(feature)
+        return self.o_proj(self.attention(q, k, v, attention_mask))
+
+
+class CrossAttentionBlockRoPE2D(nn.Module):
+    """Projected cross-attention with optional 2D RoPE on Q and K.
+
+    Each side using RoPE must follow the configured patch grid and token order.
+    """
+
+    def __init__(self, d_model: int, d_feature: int, grid_size_h: int, grid_size_w: int,
+                 rope_theta: float = 10000.0, num_heads: int = 1, *,
+                 cross_rope_q: bool = False, cross_rope_k: bool = False):
+        super().__init__()
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_feature, d_model)
+        self.v_proj = nn.Linear(d_feature, d_model)
+        self.o_proj = nn.Linear(d_model, d_model)
+        self.attention = QKVMHACrossAttentionRoPE2D(
+            grid_size_h=grid_size_h, grid_size_w=grid_size_w,
+            rope_theta=rope_theta, num_heads=num_heads,
+            cross_rope_q=cross_rope_q, cross_rope_k=cross_rope_k,
+        )
+
+    def forward(self, x: th.Tensor, feature: th.Tensor, attention_mask: th.Tensor) -> th.Tensor:
+        """x: [B, S, d_model]; feature: [B, L, d_feature]; mask: [B, L], 1 = valid.
+
+        Returns [B, S, d_model].
+        """
+        q = self.q_proj(x)
+        k = self.k_proj(feature)
+        v = self.v_proj(feature)
+        return self.o_proj(self.attention(q, k, v, attention_mask))
+
 
 class ConvAttentionBlock(nn.Module):
     def __init__(self, channel, num_heads=1, o_proj_zeroinit=False):

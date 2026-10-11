@@ -13,7 +13,7 @@ def zero_init(module: nn.Module):
     return module
 
 
-def position_embedding(x: th.Tensor, emb_dim: int):
+def position_embedding(x: th.Tensor, emb_dim: int, freq: float = 10000.0):
     """
     Apply position embedding for input
     Args:
@@ -27,7 +27,7 @@ def position_embedding(x: th.Tensor, emb_dim: int):
     if emb_dim <= 0 or not isinstance(emb_dim, int) or emb_dim % 2:
         raise ValueError("emb_dim must be a positive even integer")
     d = emb_dim // 2
-    scale = math.log(10000) / d
+    scale = math.log(freq) / d
     scale = th.exp(th.arange(d, dtype=th.float32, device=x.device) * -scale)
     emb = th.outer(x.float(), scale)
     emb = th.cat(
