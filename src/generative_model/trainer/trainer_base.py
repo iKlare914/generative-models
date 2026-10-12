@@ -12,7 +12,7 @@ class BaseTrainer(ABC):
     """Checkpoint, EMA and gradient utilities shared by concrete trainers."""
 
     def __init__(self, *, model, optimizer, save_dir, training_method, resume=False,
-                 use_ema=True, ema_decay=None):
+                 use_ema=True, ema_decay=None, ema_target=None):
         if use_ema and ema_decay is None:
             raise ValueError('ema_decay must be provided when use_ema=True')
         if ema_decay is not None and not 0 <= ema_decay < 1:
@@ -20,8 +20,12 @@ class BaseTrainer(ABC):
         self.model = model
         self.use_ema = use_ema
         self.ema_decay = ema_decay
-        self.ema_model = deepcopy(model).eval().requires_grad_(False) if use_ema else None
-        self.device = next(model.parameters()).device
+        # Latent trainers average only the DiT, without duplicating the frozen VAE.
+        self.ema_target = model if ema_target is None else ema_target
+        self.ema_model = deepcopy(self.ema_target).eval().requires_grad_(False) if use_ema else None
+        parameter = next(model.parameters())
+        self.device = parameter.device
+        self.dtype = parameter.dtype
         self.use_bf16_autocast = False
         if self.device.type == "cuda" and th.cuda.is_available():
             with th.cuda.device(self.device):
@@ -76,7 +80,7 @@ class BaseTrainer(ABC):
             )
         self.model.load_state_dict(checkpoint["model"])
         if self.use_ema:
-            self.ema_model.load_state_dict(checkpoint.get('ema_model', checkpoint['model']))
+            self.ema_model.load_state_dict(checkpoint.get('ema_model', self.ema_target.state_dict()))
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.start_epoch = checkpoint['last_epoch']
         self.wandb_runid = checkpoint['wandb_runid']
@@ -99,7 +103,7 @@ class BaseTrainer(ABC):
         if not self.use_ema:
             return
         ema_parameters = list(self.ema_model.parameters())
-        model_parameters = list(self.model.parameters())
+        model_parameters = list(self.ema_target.parameters())
         th._foreach_lerp_(ema_parameters, model_parameters, 1 - self.ema_decay)
 
         # Buffers include running statistics and integer counters, not optimized weights.

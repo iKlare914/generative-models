@@ -337,7 +337,7 @@ class VariationalAutoEncoder(nn.Module):
         x = self.encoder(x)
         mean, log_std = self.posterior_conv(x).chunk(2, dim=1)
         log_std = th.clamp(log_std, -15.0, 10.0) # ref: https://github.com/CompVis/latent-diffusion/blob/main/ldm/modules/distributions/distributions.py , but we predict log std instead of log variance
-        z = mean + th.randn_like(mean) * th.exp(log_std)
+        z = mean + th.randn_like(mean) * th.exp(log_std) # equals to sample_posterior = True
         return z, mean, log_std
 
     def decode(self, x: th.Tensor) -> th.Tensor:

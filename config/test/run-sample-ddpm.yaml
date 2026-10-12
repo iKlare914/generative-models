@@ -1,18 +1,19 @@
 # Entry point: sample/diffusion_sample.py
 # Relative file paths are resolved from this YAML directory. CLI options override YAML.
-model_path: ../../checkpoints/cifar10-20260925-1/00000768_00010.136794_checkpoint.pt
-output_path: null
-image_size: 32
-model_channels: 128
-embedding_channels: 512
-res_blocks: 3
-dropout: 0.1
-channel_mult: [1, 2, 4]
-attention_resolutions: [16, 8]
-num_heads: 4
-sample: ddpm
-timesteps: 1000
-device: cuda
-seed: 114514
-use_conv: false
-attn_o_proj_zeroinit: true
+use_latent: false  # 保留原来的像素空间 UNet 模式
+model_path: ../../checkpoints/cifar10-20260925-1/00000768_00010.136794_checkpoint.pt  # 采样 checkpoint 路径；null 时需通过 CLI 指定，优先加载 EMA
+output_path: null  # 采样图片保存路径；null 时显示图片
+image_size: 32  # UNet.image_size：RGB 图像边长，直接在像素空间训练/采样
+model_channel: 128  # UNet.model_channel：基础特征通道数
+embedding_channel: 512  # UNet.embedding_channel：时间条件嵌入维度
+resblock_num: 3  # UNet.resblock_num：每个尺度的残差块数量
+dropout: 0.1  # UNet.dropout：残差块中的 dropout 概率
+ch_mult: [1, 2, 4]  # UNet.ch_mult：各尺度相对基础通道数的倍数
+attention_resolution: [16, 8]  # UNet.attention_resolution：启用注意力的特征图边长；[] 仅保留 bottleneck 注意力
+num_heads: 4  # UNet.num_heads：注意力头数，各层通道数须能被它整除；采样须与训练一致
+sample: ddpm  # 采样算法选择；ddim 使用 ddpm 训练权重
+num_timesteps: 1000  # make_beta_schedule.num_timesteps：DDPM 训练噪声调度长度，采样须一致
+device: cuda  # 训练/采样设备，例如 cuda、cuda:0、cpu
+seed: 114514  # 入口设置的随机种子
+use_conv: false  # UNet.use_conv：上下采样及残差捷径使用卷积
+attn_o_proj_zeroinit: true  # UNet.attn_o_proj_zeroinit：注意力输出投影零初始化

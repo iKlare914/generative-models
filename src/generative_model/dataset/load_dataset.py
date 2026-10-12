@@ -145,6 +145,43 @@ class CifarCLIPDataset(CifarDataset):
         prompt = np.random.choice(self.prompt_template).format(text)
         return prompt
 
+
+class ImagenetCLIPDataset(ImagenetDataset):
+    """ImageNet with label2text and cached CLIP features from ClassLabel names.
+
+    clane9/imagenet-100 provides human-readable names in features['label'].
+    Keep that label order and use the first synonym for each prompt; resized
+    save_to_disk caches retain the metadata, so no separate label download is needed.
+    """
+
+    def __init__(self, name, split, image_size, cache_dir=None, *, text_encoder=None, max_length=32, label_drop_rate=0.1):
+        super().__init__(name, split, resize=True, image_size=image_size, cache_dir=cache_dir)
+        if not 0 <= label_drop_rate <= 1:
+            raise ValueError('label_drop_rate must be between 0 and 1.')
+        names = getattr(self.data.features['label'], 'names', None)
+        if not names:
+            raise ValueError('ImageNet CFG requires ClassLabel names in the dataset metadata.')
+        self.label_drop_rate = label_drop_rate
+        self.label2text = {
+            label: name.split(',')[0].replace('_', ' ').strip()
+            for label, name in enumerate(names)
+        }
+        self.prompts = ['a photo of a ' + text for text in self.label2text.values()]
+        prompts = [''] + self.prompts
+        encoder = text_encoder if text_encoder is not None else CLIPTextEncoder()
+        contexts, masks = [], []
+        for start in range(0, len(prompts), 64):
+            context, mask = encoder.encode_prompts(prompts[start:start + 64], max_length=max_length)
+            contexts.append(context.cpu())
+            masks.append(mask.cpu())
+        self.context = th.cat(contexts)
+        self.attention_mask = th.cat(masks)
+
+    def __getitem__(self, index):
+        image, label = super().__getitem__(index)
+        prompt_index = 0 if np.random.random() < self.label_drop_rate else label + 1
+        return image, (self.context[prompt_index], self.attention_mask[prompt_index])
+
 def getCifarLoader(repo_name, split, batch_size=8, shuffle=True, num_workers=8, image_size=None, cache_dir=None, drop_last=True):
     dataset = CifarDataset(repo_name, split, image_size=image_size, cache_dir=cache_dir)
     loader = DataLoader(
@@ -170,6 +207,19 @@ def getCifarCLIPLoader(repo_name, split, batch_size=8, shuffle=True, num_workers
         drop_last=drop_last
     )
     return loader
+
+
+def getImagenetLoader(repo_name, split, batch_size=8, shuffle=True, num_workers=4, image_size=256, cache_dir=None, drop_last=True):
+    dataset = ImagenetDataset(repo_name, split, resize=True, image_size=image_size, cache_dir=cache_dir)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
+                      drop_last=drop_last, pin_memory=True)
+
+
+def getImagenetCLIPLoader(repo_name, split, batch_size=8, shuffle=True, num_workers=4, image_size=256, cache_dir=None, drop_last=True, *, text_encoder=None, max_length=32, label_drop_rate=0.1):
+    dataset = ImagenetCLIPDataset(repo_name, split, image_size, cache_dir=cache_dir,
+                                  text_encoder=text_encoder, max_length=max_length, label_drop_rate=label_drop_rate)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
+                      drop_last=drop_last, pin_memory=True)
 
 if __name__ == '__main__':
     repo_name = "uoft-cs/cifar10"

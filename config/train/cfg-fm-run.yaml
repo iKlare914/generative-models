@@ -1,39 +1,41 @@
 # Entry point: train/cfg_diffusion_train.py
 # Relative file paths are resolved from this YAML directory. CLI options override YAML.
 # EMA decay was not specified in the old shell launcher; 0.9999 is an editable starting value.
-image_size: 32
-epochs: 768
-batch_size: 256
-lr: 0.0002
-dropout: 0.1
-weight_decay: 0.005
-model_channels: 128
-embedding_channels: 512
-feature_channels: 512
-res_blocks: 3
-channel_mult: [1, 2, 4]
-attention_resolutions: [16, 8]
-num_heads: 8
-method: fm
-fm_step: 0.01
-solver: euler
-dataset: uoft-cs/cifar10
-text_model_name: openai/clip-vit-base-patch32
-label_drop_rate: 0.2
-train_max_length: 24
-eval_max_length: 77
-guidance_scale: 3.99
-num_workers: 4
-cache_dir: ../../.cache/huggingface/datasets
-save_dir: ../../checkpoints/cifar10-cfg-fm-2
-save_interval_epoch: 64
-resume: false
-use_ema: true
-ema_decay: 0.9999
-use_torch_compile: true
-log_samples: true
-device: cuda
-seed: 114514
-wandb_mode: online
-use_conv: false
-attn_o_proj_zeroinit: true
+use_latent: false  # 保留原来的像素空间 UNet 模式
+image_size: 32  # UNet.image_size：RGB 图像边长，直接在像素空间训练/采样
+epoches: 768  # TrainerConfig.epoches：目标总训练轮数（沿用现有代码的拼写）
+batch_size: 256  # TrainerConfig / DataLoader.batch_size：每次更新的样本数
+lr: 0.0002  # AdamW.lr：学习率
+dropout: 0.1  # UNet.dropout：残差块中的 dropout 概率
+weight_decay: 0.005  # AdamW.weight_decay：权重衰减
+model_channel: 128  # UNet.model_channel：基础特征通道数
+embedding_channel: 512  # UNet.embedding_channel：时间条件嵌入维度
+d_feature: 512  # 文本特征维度，传给 CFGUNet.feature_channel；须匹配 CLIP
+resblock_num: 3  # UNet.resblock_num：每个尺度的残差块数量
+ch_mult: [1, 2, 4]  # UNet.ch_mult：各尺度相对基础通道数的倍数
+attention_resolution: [16, 8]  # UNet.attention_resolution：启用注意力的特征图边长；[] 仅保留 bottleneck 注意力
+num_heads: 8  # UNet.num_heads：注意力头数，各层通道数须能被它整除；采样须与训练一致
+method: fm  # 训练算法选择：ddpm 预测噪声，fm 预测速度
+step: 0.01  # FMSampler / CFGFMSampler.step：采样积分步长；不离散化训练时间
+solver: euler  # FM sampler.solver：目前支持 euler
+dataset_type: cifar10  # 使用 CIFAR 的 img/label 字段
+dataset: uoft-cs/cifar10  # 传给 loader 的 repo_name：数据集仓库 ID
+text_model_name: openai/clip-vit-base-patch32  # 文本编码器仓库 ID 或本地目录；CLIP 在 CPU 上运行
+label_drop_rate: 0.2  # CFG dataset.label_drop_rate：用空文本替换类别提示的概率
+train_max_length: 24  # 训练 dataset.max_length：文本 token 长度，含 BOS/EOS
+eval_max_length: 77  # CFG sampler.eval_max_length：采样文本 token 长度
+guidance_scale: 3.99  # CFG sampler.guidance_scale：0 无条件、1 纯条件、>1 增强条件引导
+num_workers: 4  # DataLoader.num_workers：数据加载子进程数
+cache_dir: ../../.cache/huggingface/datasets  # dataset.cache_dir：HF 数据缓存路径，相对本 YAML
+save_dir: ../../checkpoints/cifar10-cfg-fm-2  # TrainerConfig.save_dir：checkpoint 目录，相对本 YAML
+save_interval_epoch: 64  # TrainerConfig.save_interval_epoch：每隔多少轮保存并按需记录采样
+resume: false  # TrainerConfig.resume：从 save_dir 中最新 checkpoint 继续训练
+use_ema: true  # TrainerConfig.use_ema：维护整个 UNet 的 EMA
+ema_decay: 0.9999  # EMA 衰减系数；越接近 1，历史权重保留越多
+use_torch_compile: true  # TrainerConfig.use_torch_compile：编译 UNet
+log_samples: true  # TrainerConfig.log_samples：保存 checkpoint 时记录生成图片
+device: cuda  # 训练/采样设备，例如 cuda、cuda:0、cpu
+seed: 114514  # 入口设置的随机种子
+wandb_mode: online  # W&B 运行模式：online、offline 或 disabled
+use_conv: false  # UNet.use_conv：上下采样及残差捷径使用卷积
+attn_o_proj_zeroinit: true  # UNet.attn_o_proj_zeroinit：注意力输出投影零初始化

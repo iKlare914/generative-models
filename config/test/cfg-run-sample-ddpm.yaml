@@ -1,27 +1,28 @@
 # Entry point: sample/cfg_diffusion_sample.py
 # Relative file paths are resolved from this YAML directory. CLI options override YAML.
 # Set model_path (or random_init: true for CFG smoke tests) before sampling.
-model_path: null
-random_init: false
-output_path: null
-image_size: 32
-model_channels: 128
-embedding_channels: 512
-feature_channels: 512
-res_blocks: 3
-dropout: 0.1
-channel_mult: [1, 2, 4]
-attention_resolutions: [16, 8]
-num_heads: 4
-sample: ddpm
-use_cfgzero_star: false
-skip_steps: 0
-timesteps: 1000
-guidance_scale: 4.0
-eval_max_length: 77
-text_model_name: openai/clip-vit-base-patch32
-device: cuda
-seed: 114514
-prompt: ''
-use_conv: false
-attn_o_proj_zeroinit: true
+use_latent: false  # 保留原来的像素空间 UNet 模式
+model_path: null  # 采样 checkpoint 路径；null 时需通过 CLI 指定，优先加载 EMA
+random_init: false  # CFG 采样开关：使用未训练模型检查流程，与 model_path 互斥
+output_path: null  # 采样图片保存路径；null 时显示图片
+image_size: 32  # UNet.image_size：RGB 图像边长，直接在像素空间训练/采样
+model_channel: 128  # UNet.model_channel：基础特征通道数
+embedding_channel: 512  # UNet.embedding_channel：时间条件嵌入维度
+d_feature: 512  # 文本特征维度，传给 CFGUNet.feature_channel；须匹配 CLIP
+resblock_num: 3  # UNet.resblock_num：每个尺度的残差块数量
+dropout: 0.1  # UNet.dropout：残差块中的 dropout 概率
+ch_mult: [1, 2, 4]  # UNet.ch_mult：各尺度相对基础通道数的倍数
+attention_resolution: [16, 8]  # UNet.attention_resolution：启用注意力的特征图边长；[] 仅保留 bottleneck 注意力
+num_heads: 4  # UNet.num_heads：注意力头数，各层通道数须能被它整除；采样须与训练一致
+sample: ddpm  # 采样算法选择；ddim 使用 ddpm 训练权重
+use_cfgzero_star: false  # CFG sampler.use_cfgzero_star：启用 CFG-Zero* 投影缩放
+skip_steps: 0  # CFG sampler.skip_steps：跳过的初始更新数；DDIM 按缩减后的步数计
+num_timesteps: 1000  # make_beta_schedule.num_timesteps：DDPM 训练噪声调度长度，采样须一致
+guidance_scale: 4.0  # CFG sampler.guidance_scale：0 无条件、1 纯条件、>1 增强条件引导
+eval_max_length: 77  # CFG sampler.eval_max_length：采样文本 token 长度
+text_model_name: openai/clip-vit-base-patch32  # 文本编码器仓库 ID 或本地目录；CLIP 在 CPU 上运行
+device: cuda  # 训练/采样设备，例如 cuda、cuda:0、cpu
+seed: 114514  # 入口设置的随机种子
+prompt: ''  # 空文本作为无条件生成；需要条件文本时通过 --prompt 传入
+use_conv: false  # UNet.use_conv：上下采样及残差捷径使用卷积
+attn_o_proj_zeroinit: true  # UNet.attn_o_proj_zeroinit：注意力输出投影零初始化

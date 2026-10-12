@@ -1,7 +1,7 @@
-"""Train an unconditional DDPM or flow matching model on square CIFAR-10 images.
+"""Train an unconditional DDPM or flow matching model on CIFAR-10 or ImageNet images.
 
 Example:
-    python train/diffusion_train.py --image-size 32 --epochs 1 --device cuda --ema-decay 0.9999
+    python train/diffusion_train.py --image-size 32 --epoches 1 --device cuda --ema-decay 0.9999
 """
 
 import argparse
@@ -14,12 +14,16 @@ import numpy as np
 import torch
 
 from generative_model.config import TrainerConfig
-from generative_model.dataset.load_dataset import getCifarLoader
+from generative_model.dataset.load_dataset import getCifarLoader, getImagenetLoader
 from generative_model.cli_config import parse_args_with_config
 from generative_model.models.unet import UNet
-from generative_model.sampler import DDPMSampler, FMSampler, FMTimestepSampler, TimestepSampler, make_beta_schedule
-from generative_model.trainer.diffusion import Trainer
-from generative_model.trainer.flow_matching import FMTrainer
+from generative_model.models.dit import DiT
+from generative_model.models.latent_diffusion import LatentDiffusion
+from generative_model.sampler import (
+    DDPMSampler, FMSampler, FMTimestepSampler, TimestepSampler, make_beta_schedule,
+    LatentDDPMSampler, LatentFMSampler,
+)
+from generative_model.trainer import Trainer, FMTrainer, LatentTrainer, LatentFMTrainer
 
 
 def positive_int(value):
@@ -31,25 +35,25 @@ def positive_int(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--image-size', type=positive_int, required=True, help='Square input image side length; CIFAR-10 is 32')
-    parser.add_argument('--epochs', type=positive_int, default=100, help='Total target epochs, including epochs completed before resume')
+    parser.add_argument('--image-size', type=positive_int, required=True, help='Square RGB image size; latent spatial size is inferred from the VAE')
+    parser.add_argument('--epoches', '--epochs', type=positive_int, default=100, help='Total target epochs, including epochs completed before resume')
     parser.add_argument('--batch-size', type=positive_int, default=64)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--weight-decay', type=float, default=0.01)
-    parser.add_argument('--model-channels', type=positive_int, default=64)
-    parser.add_argument('--embedding-channels', type=positive_int, default=256)
-    parser.add_argument('--res-blocks', type=positive_int, default=2)
-    parser.add_argument('--channel-mult', type=positive_int, nargs='+', default=[1, 2, 4])
-    parser.add_argument('--attention-resolutions', type=positive_int, nargs='*', default=[16, 8], help='Actual feature-map side lengths in encoder AND decoder, not downsampling factors; empty disables their attention. Bottleneck retains attention.')
+    parser.add_argument('--model-channel', '--model-channels', type=positive_int, default=64)
+    parser.add_argument('--embedding-channel', '--embedding-channels', type=positive_int, default=256)
+    parser.add_argument('--resblock-num', '--res-blocks', type=positive_int, default=2)
+    parser.add_argument('--ch-mult', '--channel-mult', type=positive_int, nargs='+', default=[1, 2, 4])
+    parser.add_argument('--attention-resolution', '--attention-resolutions', type=positive_int, nargs='*', default=[16, 8], help='Actual feature-map side lengths in encoder AND decoder, not downsampling factors; empty disables their attention. Bottleneck retains attention.')
     parser.add_argument('--num-heads', type=positive_int, default=4)
     parser.add_argument('--use-conv', action=argparse.BooleanOptionalAction, default=False, help='Use convolutions in resampling and residual shortcuts')
     parser.add_argument('--attn-o-proj-zeroinit', action=argparse.BooleanOptionalAction, default=False, help='Zero-initialize attention output projections')
     parser.add_argument('--method', choices=['ddpm', 'fm'], default='ddpm')
-    parser.add_argument('--timesteps', type=positive_int, default=1000, help='DDPM only: diffusion schedule length')
-    parser.add_argument('--fm-step', type=float, default=0.01, help='FM only: integration step size in (0, 1] for logged samples; does not discretize training time')
+    parser.add_argument('--num-timesteps', '--timesteps', type=positive_int, default=1000, help='DDPM only: diffusion schedule length')
+    parser.add_argument('--step', '--fm-step', type=float, default=0.01, help='FM only: integration step size in (0, 1] for logged samples; does not discretize training time')
     parser.add_argument('--solver', choices=['euler'], default='euler', help='FM only: solver (currently only euler is supported)')
-    parser.add_argument('--dataset', default='uoft-cs/cifar10', help='Hugging Face CIFAR-format dataset repository')
+    parser.add_argument('--dataset', default='uoft-cs/cifar10', help='Hugging Face dataset repository, matching --dataset-type')
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--cache-dir', type=Path, default=Path('.cache/huggingface/datasets'))
     parser.add_argument('--save-dir', type=Path, default=Path('checkpoints/cifar10'))
@@ -62,23 +66,43 @@ def parse_args(argv=None):
     parser.add_argument('--device', default='cuda', help='Torch device, e.g. cuda, cuda:0, or cpu; never silently falls back')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--wandb-mode', choices=['online', 'offline', 'disabled'], default='online')
+    parser.add_argument('--use-latent', action=argparse.BooleanOptionalAction, default=False, help='Use a frozen VAE and DiT instead of the pixel-space UNet')
+    parser.add_argument('--vae-model-name-or-path', '--vae-model-name', default='stabilityai/sdxl-vae', help='SD-style AutoencoderKL Hub ID or local directory; must match training')
+    parser.add_argument('--vae-slicing', action=argparse.BooleanOptionalAction, default=True, help='Process VAE batch elements separately to reduce peak memory')
+    parser.add_argument('--d-model', '--dit-hidden-size', type=positive_int, default=256)
+    parser.add_argument('--num-layers', '--dit-depth', type=positive_int, default=8)
+    parser.add_argument('--patch-size', '--dit-patch-size', type=positive_int, default=2, help='Patch size in latent pixels')
+    parser.add_argument('--d-time-emb', '--dit-time-embedding', type=positive_int, default=256)
+    parser.add_argument('--sample-posterior', action=argparse.BooleanOptionalAction, default=True, help='Latent training: sample the VAE posterior; false uses its mean')
+    parser.add_argument('--dataset-type', choices=['cifar10', 'imagenet'], default='cifar10')
+    parser.add_argument('--dataset-split', default='train', help='Training split; e.g. train[:8] for a CIFAR smoke test')
+    # Sampling-only option: tolerate it in reused configs/commands, but never train on it.
+    parser.add_argument('--prompt', default=None, help=argparse.SUPPRESS)
     args = parse_args_with_config(parser, argv)
+    del args.prompt
     if args.use_ema and args.ema_decay is None:
         parser.error('--ema-decay is required when EMA is enabled; use --no-use-ema to disable it')
     if args.ema_decay is not None and not 0 <= args.ema_decay < 1:
         parser.error('--ema-decay must be finite and in [0, 1)')
-    max_scale = 2 ** (len(args.channel_mult) - 1)
-    if args.image_size % max_scale:
-        parser.error(f'--image-size must be divisible by {max_scale}')
-    resolutions = {args.image_size // 2 ** level for level in range(len(args.channel_mult))}
-    if not set(args.attention_resolutions).issubset(resolutions):
-        parser.error(f'--attention-resolutions must be selected from {sorted(resolutions)}')
-    if any(args.model_channels * mult % 32 for mult in args.channel_mult) or args.model_channels % 32:
-        parser.error('model channels at every level must be divisible by 32 (GroupNorm)')
-    if any(args.model_channels * mult % args.num_heads for mult in args.channel_mult):
-        parser.error('model channels at every level must be divisible by --num-heads')
-    if args.embedding_channels % 2:
-        parser.error('--embedding-channels must be even')
+    if args.use_latent:
+        if args.d_model % args.num_heads or (args.d_model // args.num_heads) % 4:
+            parser.error('--d-model must be divisible by --num-heads and have a head dimension divisible by 4 (2D RoPE)')
+        if args.d_time_emb % 2:
+            parser.error('--d-time-emb must be even')
+        # VAE downsampling and latent patch divisibility are checked after loading its config.
+    else:
+        max_scale = 2 ** (len(args.ch_mult) - 1)
+        if args.image_size % max_scale:
+            parser.error(f'--image-size must be divisible by {max_scale}')
+        resolutions = {args.image_size // 2 ** level for level in range(len(args.ch_mult))}
+        if not set(args.attention_resolution).issubset(resolutions):
+            parser.error(f'--attention-resolution must be selected from {sorted(resolutions)}')
+        if any(args.model_channel * mult % 32 for mult in args.ch_mult) or args.model_channel % 32:
+            parser.error('model channels at every level must be divisible by 32 (GroupNorm)')
+        if any(args.model_channel * mult % args.num_heads for mult in args.ch_mult):
+            parser.error('model channels at every level must be divisible by --num-heads')
+        if args.embedding_channel % 2:
+            parser.error('--embedding-channel must be even')
     if args.num_workers < 0:
         parser.error('--num-workers must be nonnegative')
     if not np.isfinite(args.lr) or args.lr <= 0:
@@ -87,13 +111,47 @@ def parse_args(argv=None):
         parser.error('--dropout must be between 0 and 1')
     if not np.isfinite(args.weight_decay) or args.weight_decay < 0:
         parser.error('--weight-decay must be finite and nonnegative')
-    if args.method == 'ddpm' and args.timesteps <= 50:
-        parser.error('--timesteps must exceed 50 for this beta schedule')
-    if args.method == 'fm' and (not np.isfinite(args.fm_step) or not 0 < args.fm_step <= 1):
-        parser.error('--fm-step must be finite and in (0, 1]')
+    if args.method == 'ddpm' and args.num_timesteps <= 50:
+        parser.error('--num-timesteps must exceed 50 for this beta schedule')
+    if args.method == 'fm' and (not np.isfinite(args.step) or not 0 < args.step <= 1):
+        parser.error('--step must be finite and in (0, 1]')
     if args.resume and not any(args.save_dir.glob('*_*_checkpoint.pt')):
         parser.error('--resume requires a checkpoint in --save-dir')
     return args
+
+
+def build_model(args):
+    if args.use_latent:
+        from diffusers import AutoencoderKL
+
+        vae = AutoencoderKL.from_pretrained(args.vae_model_name_or_path).float()
+        if vae.config.shift_factor not in (None, 0) or vae.config.latents_mean is not None or vae.config.latents_std is not None:
+            raise ValueError('This entry point requires an SD-style VAE with scalar latent scaling only.')
+        downsample = 2 ** (len(vae.config.block_out_channels) - 1)
+        if args.image_size % (downsample * args.patch_size):
+            raise ValueError(f'--image-size must be divisible by VAE downsampling * patch size ({downsample * args.patch_size}).')
+        if vae.config.in_channels != 3 or vae.config.out_channels != 3:
+            raise ValueError('The image loaders and sample grids require an RGB VAE.')
+        if args.vae_slicing:
+            vae.enable_slicing()
+        latent_size = args.image_size // downsample
+        grid_size = latent_size // args.patch_size
+        dit = DiT(
+            image_size=(latent_size, latent_size), patch_size=args.patch_size,
+            in_channel=vae.config.latent_channels, d_model=args.d_model,
+            d_time_emb=args.d_time_emb, num_heads=args.num_heads,
+            num_layers=args.num_layers, grid_size_h=grid_size, grid_size_w=grid_size,
+            extra_feature=False, d_feature=None,
+        )
+        return LatentDiffusion(dit, vae)
+    return UNet(
+        in_channel=3, out_channel=3, model_channel=args.model_channel,
+        embedding_channel=args.embedding_channel, resblock_num=args.resblock_num,
+        dropout=args.dropout, ch_mult=tuple(args.ch_mult),
+        attention_resolution=tuple(args.attention_resolution),
+        num_heads=args.num_heads, image_size=args.image_size,
+        use_conv=args.use_conv, attn_o_proj_zeroinit=args.attn_o_proj_zeroinit,
+    )
 
 
 def main(argv=None):
@@ -117,37 +175,39 @@ def main(argv=None):
 
     config = TrainerConfig(
         lr=args.lr, batch_size=args.batch_size, dropout=args.dropout,
-        weight_decay=args.weight_decay, epoches=args.epochs,
+        weight_decay=args.weight_decay, epoches=args.epoches,
         save_interval_epoch=args.save_interval_epoch, resume=args.resume,
         log_samples=args.log_samples, save_dir=args.save_dir,
         use_torch_compile=args.use_torch_compile,
         use_ema=args.use_ema, ema_decay=args.ema_decay,
         image_size=args.image_size,
     )
-    model = UNet(
-        in_channel=3, out_channel=3, model_channel=args.model_channels,
-        embedding_channel=args.embedding_channels, resblock_num=args.res_blocks,
-        dropout=args.dropout, ch_mult=tuple(args.channel_mult),
-        attention_resolution=tuple(args.attention_resolutions),
-        num_heads=args.num_heads, image_size=args.image_size,
-        use_conv=args.use_conv, attn_o_proj_zeroinit=args.attn_o_proj_zeroinit,
-    ).to(device)
-    trainer_class = FMTrainer if args.method == 'fm' else Trainer
+    model = build_model(args).to(device)
+    if args.use_latent:
+        trainer_class = LatentFMTrainer if args.method == 'fm' else LatentTrainer
+    else:
+        trainer_class = FMTrainer if args.method == 'fm' else Trainer
     if args.method == 'fm':
-        sampler = FMSampler(args.fm_step, model, device=device, solver=args.solver)
+        sampler_class = LatentFMSampler if args.use_latent else FMSampler
+        sampler = sampler_class(args.step, model, device=device, solver=args.solver)
         timestep_sampler = FMTimestepSampler('Uniform')
     else:
-        sampler = DDPMSampler(model, betas=make_beta_schedule(args.timesteps), device=device)
-        timestep_sampler = TimestepSampler(args.timesteps, 'Uniform')
-    loader = getCifarLoader(
-        args.dataset, 'train', batch_size=args.batch_size, num_workers=args.num_workers,
+        sampler_class = LatentDDPMSampler if args.use_latent else DDPMSampler
+        sampler = sampler_class(model, betas=make_beta_schedule(args.num_timesteps), device=device)
+        timestep_sampler = TimestepSampler(args.num_timesteps, 'Uniform')
+    loader_fn = getImagenetLoader if args.dataset_type == 'imagenet' else getCifarLoader
+    loader = loader_fn(
+        args.dataset, args.dataset_split, batch_size=args.batch_size, num_workers=args.num_workers,
         image_size=args.image_size, cache_dir=str(args.cache_dir),
     )
     print(f'Training on {len(loader.dataset)} images; {len(loader)} batches per epoch', flush=True)
-    trainer_class(
+    trainer = trainer_class(
         model=model, data=loader, diffusion_sampler=sampler,
         timestep_sampler=timestep_sampler, config=config,
-    ).train()
+        **({"sample_posterior": args.sample_posterior} if args.use_latent else {}),
+    )
+    trainer.train()
+    return trainer
 
 
 if __name__ == '__main__':

@@ -1,0 +1,28 @@
+# Entry: sample/cfg_diffusion_sample.py
+# Architecture/VAE must match config/train/cfg-latent-fm.yaml.
+# Supply --model-path to the checkpoint saved by that training run. EMA is preferred.
+use_latent: true  # 入口开关：true 使用冻结 VAE + DiT；false 使用 UNet
+image_size: 256  # RGB 图像边长；DiT.image_size 由此除以 VAE 下采样倍数得到 (H, W)
+vae_model_name_or_path: stabilityai/sdxl-vae  # LatentDiffusion.from_pretrained_vae 同名参数：VAE 仓库 ID 或本地目录
+vae_slicing: true  # 调用 vae.enable_slicing()，按 batch 逐张编解码以节省显存
+d_model: 256  # DiT.d_model：Transformer 隐藏维度
+num_layers: 8  # DiT.num_layers：Transformer block 数量
+patch_size: 2  # DiT.patch_size：latent 上的 patch 边长，不是 RGB 像素
+d_time_emb: 256  # DiT.d_time_emb：时间步正弦嵌入维度，须为偶数
+num_heads: 8  # 模型 attention head 数；DiT 的 d_model / num_heads 须能被 4 整除
+d_feature: 512  # 文本特征维度；传给 DiT.d_feature 或 CFGUNet.feature_channel，须匹配 CLIP
+model_path: null  # 采样 checkpoint 路径；null 时需通过 CLI 指定，优先加载 EMA
+output_path: ../../outputs/cfg-latent-fm.png  # 采样图片保存路径；null 时显示图片
+sample: fm  # 采样算法选择；ddim 使用 ddpm 训练权重
+step: 0.02  # FMSampler / CFGFMSampler.step：采样积分步长；不离散化训练时间
+solver: euler  # FM sampler.solver：目前支持 euler
+randomness: 0.0  # sampler.randomness：DDIM 的 eta 或 FM 随机强度；0 为确定性更新
+random_init: false  # CFG 采样开关：使用未训练模型检查流程，与 model_path 互斥
+text_model_name: openai/clip-vit-base-patch32  # 文本编码器仓库 ID 或本地目录；CLIP 在 CPU 上运行
+eval_max_length: 32  # CFG sampler.eval_max_length：采样文本 token 长度
+guidance_scale: 3.0  # CFG sampler.guidance_scale：0 无条件、1 纯条件、>1 增强条件引导
+prompt: ''  # 空文本作为无条件生成；需要条件文本时通过 --prompt 传入
+use_cfgzero_star: false  # CFG sampler.use_cfgzero_star：启用 CFG-Zero* 投影缩放
+skip_steps: 0  # CFG sampler.skip_steps：跳过的初始更新数；DDIM 按缩减后的步数计
+device: cuda  # 训练/采样设备，例如 cuda、cuda:0、cpu
+seed: 42  # 入口设置的随机种子
