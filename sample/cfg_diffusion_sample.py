@@ -1,4 +1,4 @@
-"""Show twelve samples in a 4x3 figure; an empty prompt means unconditional sampling.
+"""Show twelve samples in a 4x3 figure, preserving the requested text and CFG scale.
 
 Examples:
     python sample/cfg_diffusion_sample.py --model-path checkpoint.pt --image-size 32 --sample ddim
@@ -59,12 +59,12 @@ def parse_args(argv=None):
     parser.add_argument('--num-timesteps', '--timesteps', type=positive_int, default=1000, help='DDPM/DDIM: schedule length used in training')
     parser.add_argument('--spacing', '--timestep-spacing', type=positive_int, default=20, help='DDIM timestep stride')
     parser.add_argument('--randomness', type=float, default=0.0, help='Noise strength in [0, 1]: DDIM eta; FM sigma(t) = randomness * sqrt(1-t)')
-    parser.add_argument('--guidance-scale', type=float, default=3.0, help='CFG weight when --prompt is nonempty; empty text uses unconditional sampling')
+    parser.add_argument('--guidance-scale', type=float, default=3.0, help='CFG weight, preserved even when --prompt is empty')
     parser.add_argument('--eval-max-length', type=positive_int, default=77)
     parser.add_argument('--text-model-name', default='openai/clip-vit-base-patch32', help='CLIP model ID or local directory; CLIP runs on CPU')
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--prompt', type=str, default='', help='Text prompt for all twelve images; empty string means unconditional')
+    parser.add_argument('--prompt', type=str, default='', help='Text prompt for all twelve images; empty string is encoded as empty text without changing CFG settings')
     parser.add_argument('--model-type', choices=['unet', 'dit'], default='unet', help='Select model architecture independently of the dataset representation')
     parser.add_argument('--use-latent', action=argparse.BooleanOptionalAction, default=False, help='DiT training: read cached mean/std instead of encoding images; ignored for UNet and during sampling')
     parser.add_argument('--vae-model-name-or-path', '--vae-model-name', default='stabilityai/sdxl-vae', help='SD-style AutoencoderKL Hub ID or local directory; must match training')
@@ -73,6 +73,16 @@ def parse_args(argv=None):
     parser.add_argument('--num-layers', '--dit-depth', type=positive_int, default=8)
     parser.add_argument('--patch-size', '--dit-patch-size', type=positive_int, default=2, help='Patch size in latent pixels')
     parser.add_argument('--d-time-emb', '--dit-time-embedding', type=positive_int, default=256)
+    parser.add_argument('--in-channel', type=positive_int, default=None, help='DiT latent channels; omitted reads VAE config, explicit value must match it')
+    parser.add_argument('--grid-size-h', type=positive_int, default=None, help='DiT patch grid height; omitted derives from image/VAE/patch sizes')
+    parser.add_argument('--grid-size-w', type=positive_int, default=None, help='DiT patch grid width; omitted derives from image/VAE/patch sizes')
+    parser.add_argument('--extra-feature', action=argparse.BooleanOptionalAction, default=True, help='DiT text cross-attention; true for the CFG entry, false for the unconditional entry')
+    parser.add_argument('--use-rope', action=argparse.BooleanOptionalAction, default=True, help='DiT: use 2D RoPE; false uses additive 2D sinusoidal embeddings')
+    parser.add_argument('--t-freq', type=float, default=10000.0, help='DiT time embedding frequency base')
+    parser.add_argument('--pe-freq', type=float, default=10000.0, help='DiT spatial positional embedding frequency base')
+    parser.add_argument('--rope-cross-q', action=argparse.BooleanOptionalAction, default=False, help='Apply 2D RoPE to image queries in DiT cross-attention')
+    parser.add_argument('--rope-cross-k', action=argparse.BooleanOptionalAction, default=False, help='Apply 2D RoPE to text keys; requires text length equal to image token count')
+    parser.add_argument('--use-adaln-zero', action=argparse.BooleanOptionalAction, default=True, help='Zero-initialize DiT AdaLN modulation layers')
     args = parse_args_with_config(parser, argv)
     if args.model_type == 'unet':
         args.use_latent = False
@@ -82,8 +92,16 @@ def parse_args(argv=None):
     if args.output_path is not None and args.output_path.is_dir():
         parser.error('--output-path must be a file')
     if args.model_type == 'dit':
-        if args.d_model % args.num_heads or (args.d_model // args.num_heads) % 4:
-            parser.error('--d-model must be divisible by --num-heads and have a head dimension divisible by 4 (2D RoPE)')
+        if args.d_model % args.num_heads:
+            parser.error('--d-model must be divisible by --num-heads')
+        if args.use_rope and (args.d_model // args.num_heads) % 4:
+            parser.error('With --use-rope, --d-model / --num-heads must be divisible by 4')
+        if not args.use_rope and args.d_model % 4:
+            parser.error('Without RoPE, --d-model must be divisible by 4 for 2D sinusoidal embeddings')
+        if not args.extra_feature:
+            parser.error('--extra-feature must be true for this entry point')
+        if not math.isfinite(args.t_freq) or args.t_freq <= 0 or not math.isfinite(args.pe_freq) or args.pe_freq <= 0:
+            parser.error('--t-freq and --pe-freq must be finite and positive')
         if args.d_time_emb % 2:
             parser.error('--d-time-emb must be even')
         # VAE downsampling and latent patch divisibility are checked after loading its config.
@@ -144,7 +162,7 @@ def make_figure(samples, prompts, *, sample_method, guidance_scale, random_init=
         axis.imshow(pixels[index], interpolation='nearest')
         prompt_title = prompts[index]
         if prompt_title == '':
-            prompt_title = 'No prompt (unconditional)'
+            prompt_title = 'Empty prompt'
         axis.set_title(textwrap.fill(prompt_title, width=30), fontsize=10, pad=8)
         axis.set_axis_off()
     return figure
@@ -166,12 +184,24 @@ def build_model(args):
             vae.enable_slicing()
         latent_size = args.image_size // downsample
         grid_size = latent_size // args.patch_size
+        in_channel = vae.config.latent_channels if args.in_channel is None else args.in_channel
+        grid_size_h = grid_size if args.grid_size_h is None else args.grid_size_h
+        grid_size_w = grid_size if args.grid_size_w is None else args.grid_size_w
+        if in_channel != vae.config.latent_channels:
+            raise ValueError('--in-channel must match the VAE latent_channels.')
+        if (grid_size_h, grid_size_w) != (grid_size, grid_size):
+            raise ValueError('--grid-size-h and --grid-size-w must match the latent image patch grid.')
+        if args.use_rope and args.rope_cross_k and any(length != grid_size_h * grid_size_w for length in (args.eval_max_length,)):
+            raise ValueError('--rope-cross-k requires text token lengths to equal the image patch token count.')
         dit = DiT(
             image_size=(latent_size, latent_size), patch_size=args.patch_size,
-            in_channel=vae.config.latent_channels, d_model=args.d_model,
+            in_channel=in_channel, d_model=args.d_model,
             d_time_emb=args.d_time_emb, num_heads=args.num_heads,
-            num_layers=args.num_layers, grid_size_h=grid_size, grid_size_w=grid_size,
-            extra_feature=True, d_feature=args.d_feature,
+            num_layers=args.num_layers, grid_size_h=grid_size_h, grid_size_w=grid_size_w,
+            extra_feature=args.extra_feature, d_feature=args.d_feature,
+            use_rope=args.use_rope, t_freq=args.t_freq, pe_freq=args.pe_freq,
+            rope_cross_q=args.rope_cross_q, rope_cross_k=args.rope_cross_k,
+            use_adaln_zero=args.use_adaln_zero,
         )
         return LatentDiffusion(dit, vae)
     return CFGUNet(
@@ -230,7 +260,7 @@ def main(argv=None):
     model.to(device).eval()
     noise_shape = model.latent_shape if args.model_type == 'dit' else (3, args.image_size, args.image_size)
     encoder = CLIPTextEncoder(args.text_model_name)
-    guidance_scale = args.guidance_scale if args.prompt else 0.0
+    guidance_scale = args.guidance_scale
     options = dict(device=device, text_encoder=encoder, guidance_scale=guidance_scale,
                    eval_max_length=args.eval_max_length,
                    use_cfgzero_star=args.use_cfgzero_star, skip_steps=args.skip_steps)

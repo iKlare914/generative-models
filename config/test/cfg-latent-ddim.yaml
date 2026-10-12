@@ -6,23 +6,33 @@ use_latent: true  # 对应训练数据的缓存标记；采样不读取数据集
 image_size: 256  # RGB 图像边长；DiT.image_size 由此除以 VAE 下采样倍数得到 (H, W)
 vae_model_name_or_path: stabilityai/sdxl-vae  # LatentDiffusion.from_pretrained_vae 同名参数：VAE 仓库 ID 或本地目录
 vae_slicing: true  # 调用 vae.enable_slicing()，按 batch 逐张编解码以节省显存
-d_model: 256  # DiT.d_model：Transformer 隐藏维度
-num_layers: 8  # DiT.num_layers：Transformer block 数量
+d_model: 768  # DiT.d_model：Transformer 隐藏维度
+num_layers: 12  # DiT.num_layers：Transformer block 数量
 patch_size: 2  # DiT.patch_size：latent 上的 patch 边长，不是 RGB 像素
-d_time_emb: 256  # DiT.d_time_emb：时间步正弦嵌入维度，须为偶数
-num_heads: 8  # 模型 attention head 数；DiT 的 d_model / num_heads 须能被 4 整除
+d_time_emb: 512  # DiT.d_time_emb：时间步正弦嵌入维度，须为偶数
+num_heads: 12  # DiT.num_heads：须整除 d_model；use_rope=true 时每个 head 的维度须为 4 的倍数
+in_channel: null  # DiT.in_channel：null 从 VAE latent_channels 推导，SDXL VAE 为 4
+grid_size_h: null  # DiT.grid_size_h：null 自动推导 latent 高 / patch_size；当前为 16
+grid_size_w: null  # DiT.grid_size_w：null 自动推导 latent 宽 / patch_size；当前为 16
+extra_feature: true  # DiT.extra_feature：CFG 入口启用文本 cross-attention，无条件入口关闭
 d_feature: 512  # 文本特征维度；传给 DiT.d_feature 或 CFGUNet.feature_channel，须匹配 CLIP
+use_rope: true  # DiT.use_rope：true 使用 2D RoPE；false 使用加性二维正弦位置编码
+t_freq: 10000.0  # DiT.t_freq：时间步正弦嵌入的频率基数
+pe_freq: 10000.0  # DiT.pe_freq：空间位置编码频率基数，也用作 RoPE theta
+rope_cross_q: true  # DiT.rope_cross_q：是否给 cross-attention 的图像 Q 加 RoPE，仅 use_rope + extra_feature 时有效
+rope_cross_k: false  # DiT.rope_cross_k：是否给文本 K 加 2D RoPE；开启需文本 token 数等于图像 patch 数，通常保持 false
+use_adaln_zero: true  # DiT.use_adaln_zero：AdaLN 调制层零初始化；加载 checkpoint 后使用已训练权重
 model_path: null  # 采样 checkpoint 路径；null 时需通过 CLI 指定，优先加载 EMA
 output_path: ../../outputs/cfg-latent-ddim.png  # 采样图片保存路径；null 时显示图片
 sample: ddim  # 采样算法选择；ddim 使用 ddpm 训练权重
 num_timesteps: 1000  # make_beta_schedule.num_timesteps：DDPM 训练噪声调度长度，采样须一致
-spacing: 20  # DDIMSampler / CFGDDIMSampler.spacing：原始时间步索引的采样间隔
+spacing: 10  # DDIMSampler / CFGDDIMSampler.spacing：原始时间步索引的采样间隔
 randomness: 0.0  # sampler.randomness：DDIM 的 eta 或 FM 随机强度；0 为确定性更新
 random_init: false  # true 使用随机初始化的 UNet/DiT 检查流程；false 需提供 model_path；不控制 CFG
 text_model_name: openai/clip-vit-base-patch32  # 文本编码器仓库 ID 或本地目录；CLIP 在 CPU 上运行
 eval_max_length: 32  # CFG sampler.eval_max_length：采样文本 token 长度
-guidance_scale: 3.0  # CFG sampler.guidance_scale：0 无条件、1 纯条件、>1 增强条件引导
-prompt: ''  # 空文本作为无条件生成；需要条件文本时通过 --prompt 传入
+guidance_scale: 4.0  # CFG sampler.guidance_scale：0 无条件、1 纯条件、>1 增强条件引导
+prompt: ''  # 空文本条件，不改变 guidance_scale / CFG-Zero* 设置；可用 --prompt 指定文本
 use_cfgzero_star: false  # CFG sampler.use_cfgzero_star：启用 CFG-Zero* 投影缩放
 skip_steps: 0  # CFG sampler.skip_steps：跳过的初始更新数；DDIM 按缩减后的步数计
 device: cuda  # 训练/采样设备，例如 cuda、cuda:0、cpu

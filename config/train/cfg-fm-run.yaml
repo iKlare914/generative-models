@@ -1,6 +1,7 @@
 # Entry point: train/cfg_diffusion_train.py
 # Relative file paths are resolved from this YAML directory. CLI options override YAML.
 # EMA decay was not specified in the old shell launcher; 0.9999 is an editable starting value.
+model_type: unet  # 非 latent 配置：使用 UNet；CFG 入口使用 CFGUNet
 image_size: 32  # UNet.image_size：RGB 图像边长，直接在像素空间训练/采样
 epoches: 768  # TrainerConfig.epoches：目标总训练轮数（沿用现有代码的拼写）
 batch_size: 256  # TrainerConfig / DataLoader.batch_size：每次更新的样本数

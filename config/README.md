@@ -90,8 +90,27 @@ YAML 尽量使用对应构造函数的参数名，CLI 将下划线换成连字�
 这些非构造函数直传项都已在 YAML 中注释。
 
 `image_size` 在入口中始终是 RGB 图像边长；启用 latent 时，`DiT.image_size` 是从它推导的
-latent `(H, W)`。`in_channel`、`grid_size_h`、`grid_size_w` 也由 VAE 和 `patch_size` 推导，
-避免重复配置不一致。CFG 入口自动设置 DiT 的 `extra_feature=True`。
+latent `(H, W)`。`in_channel`、`grid_size_h`、`grid_size_w` 在 YAML 中显式列为 `null`，
+表示根据 VAE 和 `patch_size` 推导；手工填写时会检查是否一致。
+`extra_feature` 也显式列出：CFG 入口必须为 true，无条件入口必须为 false。
+
+所有 latent train/test YAML 展示 DiT 的全部构造参数，包括带默认值的 keyword-only 参数：
+
+```yaml
+extra_feature: true       # CFG；无条件配置为 false
+d_feature: 512           # 文本特征维度；无条件配置为 null
+use_rope: true            # false 使用加性二维正弦位置编码
+t_freq: 10000.0          # 时间嵌入频率基数
+pe_freq: 10000.0          # 空间编码频率基数 / RoPE theta
+rope_cross_q: true        # cross-attention 的图像 Q 使用 RoPE
+rope_cross_k: false       # 文本 K 是否使用 2D RoPE；通常保持 false
+use_adaln_zero: true      # AdaLN 调制层是否零初始化
+```
+
+`rope_cross_q/k` 仅在 `extra_feature=true` 且 `use_rope=true` 时生效。
+`rope_cross_k=true` 要求文本 token 长度等于图像 patch 数；当前 256 图像配置是 256 个
+image tokens，而 CLIP 文本最多 77 tokens，因此该配置不能直接开启 `rope_cross_k`。
+训练和采样应保持相同的位置编码选择与频率；构造函数的默认值不再隐藏在配置之外。
 
 ## 各方法适用的配置
 
@@ -112,7 +131,7 @@ DDIM 使用 DDPM 训练的模型，没有独立的 DDIM 训练配置。DDPM 的�
 CFG 配置额外包含 `d_feature`、`text_model_name`、`eval_max_length`、
 `guidance_scale`。其中训练配置另外使用 `label_drop_rate`、`train_max_length`；
 采样配置另外使用 `prompt`、`random_init`、`use_cfgzero_star`、`skip_steps`。
-这些字段不放入非 CFG 配置，CFG 采样开关也不放入当前训练入口的配置。
+这些字段不放入非 CFG 配置，训练入口也支持 `use_cfgzero_star` 和 `skip_steps`，但它们只作用于日志采样。
 
 ## CFG-Zero* 与独立跳步
 
@@ -151,7 +170,9 @@ FM 作用于速度预测。`guidance_scale: 0` 和 `1` 保持纯无条件/纯条
 | `model_type: dit`、`use_latent: false` | DiT + 冻结 VAE | RGB 图片，每批在线编码 |
 | `model_type: dit`、`use_latent: true` | DiT + 冻结 VAE | 本地缓存的未缩放 mean/std，不再调用 VAE encoder |
 
-普通 UNet YAML 不填写 `use_latent`。DiT YAML 只填写 DiT 的模型参数；`d_model`、`num_layers`、
+非 latent 的训练和采样 YAML 都显式设置 `model_type: unet`，使用 UNet / CFGUNet，
+其参数注释只描述 UNet，不混入 DiT；不填写 `use_latent`，按 false 处理。
+latent YAML 显式设置 `model_type: dit`，只填写 DiT 的模型参数；`d_model`、`num_layers`、
 `patch_size`、`d_time_emb` 对应 DiT，UNet 则使用 `model_channel`、`embedding_channel`、`resblock_num`、
 `ch_mult`、`attention_resolution` 等。两类架构分别校验、分别构造，不互相套用参数。
 采样只依据 `model_type` 选择模型与解码流程，不读取训练数据，因此不使用 `use_latent`。
@@ -169,18 +190,18 @@ FM 作用于速度预测。`guidance_scale: 0` 和 `1` 保持纯无条件/纯条
 
 - 冻结 `stabilityai/sdxl-vae`，使用 FP32；256×256 RGB 对应 4×32×32 latent。
   使用配置中的 `scaling_factor=0.13025`。启用 `vae_slicing` 降低 VAE 的峰值显存，代价是吞吐量。
-- DiT：8 层、宽度 256、8 个 attention heads、latent patch size 2、time embedding 256、
-  2D RoPE 和 AdaLN-Zero。每张图 256 个 image tokens；本项目实现的 DiT 参数量约 10.8M，
-  加文本 cross-attention 的 CFG 版本约 15.5M，冻结 VAE 和 CLIP 不计入这两个数字。
+- DiT：8 层、宽度 768、12 个 attention heads、latent patch size 2、time embedding 512、
+  2D RoPE 和 AdaLN-Zero。每张图 256 个 image tokens；本项目实现的 DiT 参数量约 95.1M，
+  加文本 cross-attention 的 CFG 版本约 125.0M，冻结 VAE 和 CLIP 不计入这两个数字。
 - AdamW：`lr=1e-4`、`weight_decay=0`、EMA `0.9999`；先训练 100 epochs、每 10 epochs 保存。
   这是学习实验的起点，不是保证收敛或生成质量的训练预算。现有 DiT 没有 dropout 参数，
   DiT YAML 不填写 UNet 的 `dropout`；入口给 TrainerConfig 的占位值为 0。
 - DiT 参数保持 FP32，由 trainer 在支持的 CUDA GPU 上启用 BF16 autocast；VAE 保持自己的精度策略。
   暂不开 `torch.compile`，便于调试；跑通后可使用 `--use-torch-compile`。
-- DDPM：1000 步线性噪声调度。DDIM：stride 20，包含末步，共 51 步，eta 0。
-  FM：uniform 连续时间训练，Euler 50 步采样，randomness 0。
+- DDPM：1000 步线性噪声调度。DDIM：stride 10，包含末步，共 101 步，eta 0。
+  FM：uniform 连续时间训练，Euler 步长 0.01，共 100 步；CFG FM 开启 Zero* 并跳过前 5 步，实际更新 95 次。randomness 为 0。
 - CFG：冻结 CPU CLIP `openai/clip-vit-base-patch32`，特征宽度 512，训练/采样文本长度均 32，
-  空文本概率 0.1，采样 guidance 3；先关闭 CFG-Zero* 和跳步，建立基准。
+  空文本概率 0.1，采样 guidance 4.0；CFG FM 的独立采样和训练日志采样均启用 CFG-Zero*、skip_steps=5；DDPM/DDIM 保持关闭、skip_steps=0。这些引导和跳步设置不影响训练 loss。
 
 ### 数据与 GPU
 
@@ -189,13 +210,13 @@ FM 作用于速度预测。`guidance_scale: 0` 和 `1` 保持纯无条件/纯条
 `dataset_type: imagenet` 使用 `image` / `label` 字段及现有 resize cache，CFG 额外需要
 `ClassLabel.names` 中的人类可读类别名称。只使用 `dataset_split: train`，避免把 validation 混入训练。
 训练日志的固定 prompts 从当前 ImageNet 类别列表中取。所有采样 YAML 的 `prompt` 默认是空字符串；
-采样时空字符串直接交给 text encoder 作为无条件文本，12 张图全部使用空条件，有效 guidance scale 为 0。
+采样时空字符串直接交给 text encoder，12 张图全部使用空文本条件；guidance scale 和 CFG-Zero* 保留配置值，不因空文本被覆盖。
 需要条件生成时通过 `--prompt "a photo of a pineapple"` 指定，12 张图均使用该文本和配置中的 guidance scale。
 训练 YAML 无需 `prompt`；训练入口即使收到此字段或 `--prompt` 也会忽略，训练条件及日志示例由 dataset 提供。
 更换 ImageNet 数据源时设置 `dataset`，并确认上述字段约定。
 
-RTX PRO 6000 Blackwell 为 96GB，RTX 5090 为 32GB。初始建议分别为 batch 128 和 32，
-其余模型/算法参数保持一致；未在这两张卡上实测峰值显存。batch 改变也会改变每 epoch 的更新次数
+RTX PRO 6000 Blackwell 为 96GB，RTX 5090 为 32GB。训练 YAML 的 batch 仍为 128，5090 命令示例保留覆盖为 32，
+其余模型/算法参数保持一致。网络已增大到宽度 768，这两个 batch 值都需要重新验证显存，尚未在两张卡上实测。batch 改变也会改变每 epoch 的更新次数
 及 EMA 对应的样本跨度，因此适合功能测试，但不是严格等价的训练对照。
 
 本机用已有 CIFAR 验证时，覆盖 `dataset_type`、`dataset`、`cache_dir` 和 split，并加 `--no-use-latent` 使用在线编码（仍为 DiT）。
@@ -247,7 +268,7 @@ CFG 缓存 loader 返回 `((mean, std), (context, attention_mask))`，用 `PROMP
 ### 配置依据
 
 - [官方 DiT 模型配置](https://github.com/facebookresearch/DiT/blob/main/models.py)：DiT-S/2 为 12 层、384 宽、6 heads。
-  本配置主动缩小到 8 层、256 宽，使用项目现有的 RoPE/cross-attention 实现，并非原论文的原样复现。
+  当前配置按用户指定使用 8 层、768 宽，使用项目现有的 RoPE/cross-attention 实现，并非原论文的原样复现。
 - [官方 DiT 训练代码](https://github.com/facebookresearch/DiT/blob/main/train.py)：AdamW 1e-4、weight decay 0、EMA 0.9999；
   本项目 FM 配置复用这些值作为实验起点，不声称是官方 FM 最优参数。
 - [SDXL VAE 配置](https://huggingface.co/stabilityai/sdxl-vae/blob/main/config.json)、

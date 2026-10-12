@@ -188,6 +188,8 @@ class DiT(nn.Module):
 
         self.last_layer = LastLayer(patch_size, in_channel, d_model, d_time_emb, t_freq ,use_adaln_zero)
 
+        self._init_weight()
+
     def unpatchify(self, x: th.Tensor) -> th.Tensor:
         """
         Unpatchify Images
@@ -205,6 +207,16 @@ class DiT(nn.Module):
         x = x.permute(0, 5, 1, 3, 2, 4) # [B, C, H/p, p, W/p, p]
 
         return x.reshape(b, c, h, w)
+
+    def _init_weight(self):
+        # Treat conv as linear initialization
+        w = self.patch_embed.proj.weight.data
+        nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        nn.init.constant_(self.patch_embed.proj.bias, 0.0)
+
+        # last layer zero init
+        nn.init.constant_(self.last_layer.linear.weight, 0.0)
+        nn.init.constant_(self.last_layer.linear.bias, 0.0)
 
     def forward(self, x: th.Tensor, t: th.Tensor, c: th.Tensor = None, c_attention_mask: th.Tensor = None):
         """
