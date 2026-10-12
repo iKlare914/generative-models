@@ -1,4 +1,4 @@
-from datasets import Dataset as HFDataset, load_dataset, load_from_disk
+from datasets import Array3D, Dataset as HFDataset, load_dataset, load_from_disk
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
@@ -97,6 +97,55 @@ class ImagenetDataset(Dataset):
         return img.permute(2, 0, 1).contiguous() / 127.5 - 1
 
 
+class LatentImagenetDataset(ImagenetDataset):
+    """Load or create an ImageNet posterior cache, returning ((mean, std), label).
+
+    Supply a pretrained AutoencoderKL as vae on a cache miss. On a cache hit,
+    neither a VAE nor the source image dataset is needed. image_size is the RGB
+    size, not the latent size. save_dir selects the latent cache root, while
+    cache_dir keeps its existing meaning as the source HF dataset cache.
+    Use a separate save_dir for each VAE checkpoint. No VAE is retained in this
+    dataset, so DataLoader workers only read CPU arrays from disk.
+
+    mean/std are unscaled CPU float32 tensors. Use use_latent_dataset=True in
+    the latent trainer; it handles sampling and scaling_factor. __getitem__
+    performs no pixel normalization because to_latent already normalized input.
+    """
+
+    def __init__(
+        self, name='clane9/imagenet-100', split='train', image_size=256, cache_dir=None,
+        *, vae=None, save_dir=None, batch_size=8, device=None,
+    ):
+        split = 'all' if split is None else split
+        self.image_size = image_size
+        self.latent_dir = image_transforms.get_latent_dataset_dir(name, image_size, split, save_dir)
+        if not self.latent_dir.exists():
+            if vae is None:
+                raise ValueError('A pretrained vae is required to create a missing latent dataset cache.')
+            super().__init__(name, split, resize=True, image_size=image_size, cache_dir=cache_dir)
+            image_transforms.to_latent(
+                self.data, vae, save_dir=save_dir, batch_size=batch_size,
+                repo_name=name, split=split, device=device,
+            )
+        cached = load_from_disk(self.latent_dir)
+        if not isinstance(cached, HFDataset):
+            raise TypeError(f'Latent cache {self.latent_dir} must contain a single Dataset.')
+        if split != 'all' and cached.split != split:
+            raise ValueError(f'Latent cache {self.latent_dir} does not match split {split!r}.')
+        feature = cached.features.get('image')
+        if not isinstance(feature, dict) or not all(isinstance(feature.get(key), Array3D) for key in ('mean', 'std')):
+            raise ValueError('Latent cache must contain image.mean and image.std Array3D features.')
+        if 'label' not in cached.column_names:
+            raise ValueError('Latent ImageNet cache must contain a label column.')
+        self.data = cached.with_format('numpy')
+
+    def __getitem__(self, index):
+        sample = self.data[index]
+        mean = th.tensor(sample['image']['mean'], dtype=th.float32)
+        std = th.tensor(sample['image']['std'], dtype=th.float32)
+        return (mean, std), int(sample['label'])
+
+
 class CifarCLIPDataset(CifarDataset):
     """Return CIFAR images and precomputed conditioning for random class prompts."""
 
@@ -189,6 +238,45 @@ class ImagenetCLIPDataset(ImagenetDataset):
         """Choose a shared prompt template for the given ImageNet class."""
         return np.random.choice(self.prompt_template).format(self.label2text[label])
 
+
+class LatentImagenetCLIPDataset(LatentImagenetDataset):
+    """Read cached ((mean, std), (context, mask)) batches without VAE encoding."""
+
+    def __init__(self, name, split, image_size, cache_dir=None, *, save_dir=None, text_encoder=None, max_length=32, label_drop_rate=0.1):
+        super().__init__(name, split, image_size=image_size, cache_dir=cache_dir, save_dir=save_dir)
+        if not 0 <= label_drop_rate <= 1:
+            raise ValueError('label_drop_rate must be between 0 and 1.')
+        names = getattr(self.data.features['label'], 'names', None)
+        if not names:
+            raise ValueError('ImageNet CFG requires ClassLabel names in the dataset metadata.')
+        self.label_drop_rate = label_drop_rate
+        self.label2text = {
+            label: name.split(',')[0].replace('_', ' ').strip()
+            for label, name in enumerate(names)
+        }
+        self.prompt_template = list(PROMPT_TEMPLATES)
+        self.max_length = max_length
+        # Keep one fixed prompt per class for trainer sample logging.
+        self.prompts = [self.prompt_template[0].format(text) for text in self.label2text.values()]
+        prompts = [''] + [template.format(text) for text in self.label2text.values() for template in self.prompt_template]
+        encoder = text_encoder if text_encoder is not None else CLIPTextEncoder()
+        contexts, masks = [], []
+        for start in range(0, len(prompts), 64):
+            context, mask = encoder.encode_prompts(prompts[start:start + 64], max_length=max_length)
+            contexts.append(context.cpu())
+            masks.append(mask.cpu())
+        self.hidden_state_table = dict(zip(prompts, th.cat(contexts).unbind(0)))
+        self.attention_mask_table = dict(zip(prompts, th.cat(masks).unbind(0)))
+
+    def __getitem__(self, index):
+        latents, label = super().__getitem__(index)
+        prompt = '' if np.random.random() < self.label_drop_rate else self.get_prompt(label)
+        return latents, (self.hidden_state_table[prompt], self.attention_mask_table[prompt])
+
+    def get_prompt(self, label):
+        """Choose a shared prompt template for the given ImageNet class."""
+        return np.random.choice(self.prompt_template).format(self.label2text[label])
+
 def getCifarLoader(repo_name, split, batch_size=8, shuffle=True, num_workers=8, image_size=None, cache_dir=None, drop_last=True):
     dataset = CifarDataset(repo_name, split, image_size=image_size, cache_dir=cache_dir)
     loader = DataLoader(
@@ -227,6 +315,19 @@ def getImagenetCLIPLoader(repo_name, split, batch_size=8, shuffle=True, num_work
                                   text_encoder=text_encoder, max_length=max_length, label_drop_rate=label_drop_rate)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
                       drop_last=drop_last, pin_memory=True)
+
+def getLatentImagenetLoader(repo_name, split, batch_size=8, shuffle=True, num_workers=4, image_size=256, cache_dir=None, drop_last=True, *, save_dir=None):
+    dataset = LatentImagenetDataset(repo_name, split, image_size, cache_dir=cache_dir, save_dir=save_dir)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
+                      drop_last=drop_last, pin_memory=True)
+
+
+def getLatentImagenetCLIPLoader(repo_name, split, batch_size=8, shuffle=True, num_workers=4, image_size=256, cache_dir=None, drop_last=True, *, save_dir=None, text_encoder=None, max_length=32, label_drop_rate=0.1):
+    dataset = LatentImagenetCLIPDataset(repo_name, split, image_size, cache_dir=cache_dir, save_dir=save_dir,
+                                        text_encoder=text_encoder, max_length=max_length, label_drop_rate=label_drop_rate)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
+                      drop_last=drop_last, pin_memory=True)
+
 
 if __name__ == '__main__':
     repo_name = "uoft-cs/cifar10"

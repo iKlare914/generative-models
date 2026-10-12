@@ -1,7 +1,8 @@
 # Entry: sample/diffusion_sample.py
 # Architecture/VAE must match config/train/latent-ddpm.yaml.
 # Supply --model-path to the checkpoint saved by that training run. EMA is preferred.
-use_latent: true  # 入口开关：true 使用冻结 VAE + DiT；false 使用 UNet
+model_type: dit  # 采样架构由此决定，使用 DiT + VAE 解码
+use_latent: true  # 对应训练数据的缓存标记；采样不读取数据集，不使用此开关选择模型
 image_size: 256  # RGB 图像边长；DiT.image_size 由此除以 VAE 下采样倍数得到 (H, W)
 vae_model_name_or_path: stabilityai/sdxl-vae  # LatentDiffusion.from_pretrained_vae 同名参数：VAE 仓库 ID 或本地目录
 vae_slicing: true  # 调用 vae.enable_slicing()，按 batch 逐张编解码以节省显存

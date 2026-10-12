@@ -14,7 +14,8 @@ import numpy as np
 import torch
 
 from generative_model.config import TrainerConfig
-from generative_model.dataset.load_dataset import getCifarCLIPLoader, getImagenetCLIPLoader
+from generative_model.dataset.image_transforms import DATASET_DIR, get_latent_dataset_dir
+from generative_model.dataset.load_dataset import getCifarCLIPLoader, getImagenetCLIPLoader, getLatentImagenetCLIPLoader
 from generative_model.cli_config import parse_args_with_config
 from generative_model.models.unet import CFGUNet
 from generative_model.models.dit import DiT
@@ -73,7 +74,8 @@ def parse_args(argv=None):
     parser.add_argument('--device', default='cuda', help='Torch device, e.g. cuda, cuda:0, or cpu; never silently falls back')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--wandb-mode', choices=['online', 'offline', 'disabled'], default='online')
-    parser.add_argument('--use-latent', action=argparse.BooleanOptionalAction, default=False, help='Use a frozen VAE and DiT instead of the pixel-space UNet')
+    parser.add_argument('--model-type', choices=['unet', 'dit'], default='unet', help='Select model architecture independently of the dataset representation')
+    parser.add_argument('--use-latent', action=argparse.BooleanOptionalAction, default=False, help='DiT training: read cached mean/std instead of encoding images; ignored for UNet and during sampling')
     parser.add_argument('--vae-model-name-or-path', '--vae-model-name', default='stabilityai/sdxl-vae', help='SD-style AutoencoderKL Hub ID or local directory; must match training')
     parser.add_argument('--vae-slicing', action=argparse.BooleanOptionalAction, default=True, help='Process VAE batch elements separately to reduce peak memory')
     parser.add_argument('--d-model', '--dit-hidden-size', type=positive_int, default=256)
@@ -82,16 +84,19 @@ def parse_args(argv=None):
     parser.add_argument('--d-time-emb', '--dit-time-embedding', type=positive_int, default=256)
     parser.add_argument('--sample-posterior', action=argparse.BooleanOptionalAction, default=True, help='Latent training: sample the VAE posterior; false uses its mean')
     parser.add_argument('--dataset-type', choices=['cifar10', 'imagenet'], default='cifar10')
+    parser.add_argument('--latent-cache-dir', type=Path, default=DATASET_DIR, help='Root containing cached ImageNet mean/std datasets, matching preprocessing --save-dir')
     parser.add_argument('--dataset-split', default='train', help='Training split; e.g. train[:8] for a CIFAR smoke test')
     # Sampling-only option: tolerate it in reused configs/commands, but never train on it.
     parser.add_argument('--prompt', default=None, help=argparse.SUPPRESS)
     args = parse_args_with_config(parser, argv)
+    if args.model_type == 'unet':
+        args.use_latent = False
     del args.prompt
     if args.use_ema and args.ema_decay is None:
         parser.error('--ema-decay is required when EMA is enabled; use --no-use-ema to disable it')
     if args.ema_decay is not None and not 0 <= args.ema_decay < 1:
         parser.error('--ema-decay must be finite and in [0, 1)')
-    if args.use_latent:
+    if args.model_type == 'dit':
         if args.d_model % args.num_heads or (args.d_model // args.num_heads) % 4:
             parser.error('--d-model must be divisible by --num-heads and have a head dimension divisible by 4 (2D RoPE)')
         if args.d_time_emb % 2:
@@ -110,6 +115,8 @@ def parse_args(argv=None):
             parser.error('model channels at every level must be divisible by --num-heads')
         if args.embedding_channel % 2:
             parser.error('--embedding-channel must be even')
+    if args.use_latent and args.dataset_type != 'imagenet':
+        parser.error('--use-latent currently requires --dataset-type imagenet; use --no-use-latent for online encoding of CIFAR images')
     if args.num_workers < 0:
         parser.error('--num-workers must be nonnegative')
     if not np.isfinite(args.lr) or args.lr <= 0:
@@ -134,7 +141,7 @@ def parse_args(argv=None):
 
 
 def build_model(args):
-    if args.use_latent:
+    if args.model_type == 'dit':
         from diffusers import AutoencoderKL
 
         vae = AutoencoderKL.from_pretrained(args.vae_model_name_or_path).float()
@@ -170,6 +177,10 @@ def build_model(args):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.use_latent:
+        latent_dir = get_latent_dataset_dir(args.dataset, args.image_size, args.dataset_split, args.latent_cache_dir)
+        if not latent_dir.is_dir():
+            raise FileNotFoundError(f'Latent cache not found: {latent_dir}. Run utils/download_and_process_imagenet.py --use-latent first.')
     device = torch.device(args.device)
     if device.type == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA is unavailable; training stopped without falling back to CPU.')
@@ -188,7 +199,7 @@ def main(argv=None):
     print(json.dumps(vars(args), indent=2, default=str), flush=True)
 
     config = TrainerConfig(
-        lr=args.lr, batch_size=args.batch_size, dropout=args.dropout,
+        lr=args.lr, batch_size=args.batch_size, dropout=args.dropout if args.model_type == 'unet' else 0.0,
         weight_decay=args.weight_decay, epoches=args.epoches,
         save_interval_epoch=args.save_interval_epoch, resume=args.resume,
         log_samples=args.log_samples, save_dir=args.save_dir,
@@ -198,28 +209,32 @@ def main(argv=None):
     )
     encoder = CLIPTextEncoder(args.text_model_name)
     model = build_model(args).to(device)
-    if args.use_latent:
+    if args.model_type == 'dit':
         trainer_class = CFGLatentFMTrainer if args.method == 'fm' else CFGLatentTrainer
     else:
         trainer_class = CFGFMTrainer if args.method == 'fm' else CFGTrainer
     if args.method == 'fm':
-        sampler_class = CFGLatentFMSampler if args.use_latent else CFGFMSampler
+        sampler_class = CFGLatentFMSampler if args.model_type == 'dit' else CFGFMSampler
         sampler = sampler_class(
             args.step, model, device=device, text_encoder=encoder, solver=args.solver,
             guidance_scale=args.guidance_scale, eval_max_length=args.eval_max_length,
         )
         timestep_sampler = FMTimestepSampler('Uniform')
     else:
-        sampler_class = CFGLatentDDPMSampler if args.use_latent else CFGDDPMSampler
+        sampler_class = CFGLatentDDPMSampler if args.model_type == 'dit' else CFGDDPMSampler
         sampler = sampler_class(
             model, betas=make_beta_schedule(args.num_timesteps), device=device, text_encoder=encoder,
             guidance_scale=args.guidance_scale, eval_max_length=args.eval_max_length,
         )
         timestep_sampler = TimestepSampler(args.num_timesteps, 'Uniform')
-    loader_fn = getImagenetCLIPLoader if args.dataset_type == 'imagenet' else getCifarCLIPLoader
+    if args.use_latent:
+        loader_fn = getLatentImagenetCLIPLoader
+    else:
+        loader_fn = getImagenetCLIPLoader if args.dataset_type == 'imagenet' else getCifarCLIPLoader
     loader = loader_fn(
         args.dataset, args.dataset_split, batch_size=args.batch_size, num_workers=args.num_workers,
         image_size=args.image_size, cache_dir=str(args.cache_dir),
+        **({"save_dir": args.latent_cache_dir} if args.use_latent else {}),
         text_encoder=encoder, max_length=args.train_max_length, label_drop_rate=args.label_drop_rate,
     )
     print(f'Training on {len(loader.dataset)} images; {len(loader)} batches per epoch', flush=True)
@@ -227,7 +242,7 @@ def main(argv=None):
     trainer = trainer_class(
         model=model, data=loader, diffusion_sampler=sampler,
         timestep_sampler=timestep_sampler, config=config, fixed_prompts=fixed_prompts,
-        **({"sample_posterior": args.sample_posterior} if args.use_latent else {}),
+        **({"sample_posterior": args.sample_posterior, "use_latent_dataset": args.use_latent} if args.model_type == 'dit' else {}),
     )
     trainer.train()
     return trainer

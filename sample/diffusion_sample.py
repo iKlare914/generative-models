@@ -53,7 +53,8 @@ def parse_args(argv=None):
     parser.add_argument('--randomness', type=float, default=0.0, help='Noise strength in [0, 1]: DDIM eta; FM sigma(t) = randomness * sqrt(1-t)')
     parser.add_argument('--device', default='cpu', help='Torch device, e.g. cpu, mps, or cuda; never silently falls back')
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--use-latent', action=argparse.BooleanOptionalAction, default=False, help='Use a frozen VAE and DiT instead of the pixel-space UNet')
+    parser.add_argument('--model-type', choices=['unet', 'dit'], default='unet', help='Select model architecture independently of the dataset representation')
+    parser.add_argument('--use-latent', action=argparse.BooleanOptionalAction, default=False, help='DiT training: read cached mean/std instead of encoding images; ignored for UNet and during sampling')
     parser.add_argument('--vae-model-name-or-path', '--vae-model-name', default='stabilityai/sdxl-vae', help='SD-style AutoencoderKL Hub ID or local directory; must match training')
     parser.add_argument('--vae-slicing', action=argparse.BooleanOptionalAction, default=True, help='Process VAE batch elements separately to reduce peak memory')
     parser.add_argument('--d-model', '--dit-hidden-size', type=positive_int, default=256)
@@ -61,6 +62,8 @@ def parse_args(argv=None):
     parser.add_argument('--patch-size', '--dit-patch-size', type=positive_int, default=2, help='Patch size in latent pixels')
     parser.add_argument('--d-time-emb', '--dit-time-embedding', type=positive_int, default=256)
     args = parse_args_with_config(parser, argv)
+    if args.model_type == 'unet':
+        args.use_latent = False
 
     if not args.model_path.is_file():
         parser.error(f'--model-path is not a file: {args.model_path}')
@@ -71,7 +74,7 @@ def parse_args(argv=None):
         image_format = Image.registered_extensions().get(args.output_path.suffix.lower())
         if image_format not in Image.SAVE:
             parser.error('--output-path must have a supported image extension, e.g. .png or .jpg')
-    if args.use_latent:
+    if args.model_type == 'dit':
         if args.d_model % args.num_heads or (args.d_model // args.num_heads) % 4:
             parser.error('--d-model must be divisible by --num-heads and have a head dimension divisible by 4 (2D RoPE)')
         if args.d_time_emb % 2:
@@ -113,7 +116,7 @@ def make_grid(samples):
 
 
 def build_model(args):
-    if args.use_latent:
+    if args.model_type == 'dit':
         from diffusers import AutoencoderKL
 
         vae = AutoencoderKL.from_pretrained(args.vae_model_name_or_path).float()
@@ -161,7 +164,7 @@ def main(argv=None):
     if not isinstance(checkpoint, dict) or not any(key in checkpoint for key in ('ema_model', 'model')):
         raise ValueError('Checkpoint must contain an ema_model or model key holding model weights.')
     checkpoint_method = checkpoint.get('training_method', 'ddpm')
-    expected_method = ('latent_' if args.use_latent else '') + ('fm' if args.sample == 'fm' else 'ddpm')
+    expected_method = ('latent_' if args.model_type == 'dit' else '') + ('fm' if args.sample == 'fm' else 'ddpm')
     if checkpoint_method != expected_method:
         raise ValueError(
             f'Checkpoint training method is {checkpoint_method!r}, '
@@ -170,7 +173,7 @@ def main(argv=None):
     weights_key = 'ema_model' if 'ema_model' in checkpoint else 'model'
     state = checkpoint[weights_key]
     # torch.compile adds this prefix to training state dicts.
-    if args.use_latent:
+    if args.model_type == 'dit':
         # Non-EMA checkpoints contain dit.* and vae.*; compiled DiT adds dit._orig_mod.*.
         if 'model' in checkpoint:
             full_state = {
@@ -188,23 +191,23 @@ def main(argv=None):
     print(f'Loaded {weights_key} weights from {args.model_path}', flush=True)
     del checkpoint, state
     model.to(device).eval()
-    noise_shape = model.latent_shape if args.use_latent else (3, args.image_size, args.image_size)
+    noise_shape = model.latent_shape if args.model_type == 'dit' else (3, args.image_size, args.image_size)
 
     if args.sample == 'fm':
-        sampler_class = LatentFMSampler if args.use_latent else FMSampler
+        sampler_class = LatentFMSampler if args.model_type == 'dit' else FMSampler
         sampler = sampler_class(args.step, model, device=device, solver=args.solver, randomness=args.randomness)
         num_steps = sampler.sample_nums
         print(f'FM solver: {args.solver}, randomness: {args.randomness:g}', flush=True)
     else:
         betas = make_beta_schedule(args.num_timesteps)
         if args.sample == 'ddim':
-            sampler_class = LatentDDIMSampler if args.use_latent else DDIMSampler
+            sampler_class = LatentDDIMSampler if args.model_type == 'dit' else DDIMSampler
             sampler = sampler_class(
                 model, spacing=args.spacing, randomness=args.randomness,
                 betas=betas, device=device,
             )
         else:
-            sampler_class = LatentDDPMSampler if args.use_latent else DDPMSampler
+            sampler_class = LatentDDPMSampler if args.model_type == 'dit' else DDPMSampler
             sampler = sampler_class(model, betas=betas, device=device)
         num_steps = sampler.num_timesteps
     noise = torch.randn((9, *noise_shape), device=device)

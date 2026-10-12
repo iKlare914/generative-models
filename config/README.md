@@ -85,7 +85,7 @@ YAML 尽量使用对应构造函数的参数名，CLI 将下划线换成连字�
 
 旧字段和旧 CLI 名称仍作为别名解析；新 YAML 只写新名称。
 同一字段不能同时写新旧两个名字，CLI 覆盖 YAML 时则新旧别名均有效。
-`use_latent`、`method`、`sample` 等是入口选择开关；`vae_slicing` 对应 VAE 的方法开关，
+`model_type` 选择模型架构，`use_latent` 选择训练数据表示；`method`、`sample` 选择算法；`vae_slicing` 对应 VAE 的方法开关，
 `train_max_length` 用来区分训练 dataset 的 `max_length` 与 sampler 的 `eval_max_length`。
 这些非构造函数直传项都已在 YAML 中注释。
 
@@ -143,9 +143,19 @@ FM 作用于速度预测。`guidance_scale: 0` 和 `1` 保持纯无条件/纯条
 
 ## Latent DiT 学习实验
 
-四个原有 Python 入口都支持 `use_latent: true`（CLI：`--use-latent`），不需要新增启动脚本。
-关闭时仍使用原来的 UNet。`image_size` 始终表示 RGB 图像尺寸；latent 的通道、下采样倍数
-和 scaling factor 从 VAE 配置读取，不需要在 YAML 手工重复填写。
+四个原有 Python 入口使用 `model_type` 选择架构，训练入口另用 `use_latent` 选择数据表示：
+
+| 配置 | 模型 | 训练输入 |
+| --- | --- | --- |
+| 默认 `model_type: unet` | UNet / CFGUNet | RGB 图片；忽略 `use_latent`，按 false 处理 |
+| `model_type: dit`、`use_latent: false` | DiT + 冻结 VAE | RGB 图片，每批在线编码 |
+| `model_type: dit`、`use_latent: true` | DiT + 冻结 VAE | 本地缓存的未缩放 mean/std，不再调用 VAE encoder |
+
+普通 UNet YAML 不填写 `use_latent`。DiT YAML 只填写 DiT 的模型参数；`d_model`、`num_layers`、
+`patch_size`、`d_time_emb` 对应 DiT，UNet 则使用 `model_channel`、`embedding_channel`、`resblock_num`、
+`ch_mult`、`attention_resolution` 等。两类架构分别校验、分别构造，不互相套用参数。
+采样只依据 `model_type` 选择模型与解码流程，不读取训练数据，因此不使用 `use_latent`。
+`image_size` 始终表示 RGB 图像尺寸；latent 的通道、下采样倍数和 scaling factor 从 VAE 配置读取。
 
 | 任务 | 无条件配置 | CFG 配置 |
 | --- | --- | --- |
@@ -164,7 +174,7 @@ FM 作用于速度预测。`guidance_scale: 0` 和 `1` 保持纯无条件/纯条
   加文本 cross-attention 的 CFG 版本约 15.5M，冻结 VAE 和 CLIP 不计入这两个数字。
 - AdamW：`lr=1e-4`、`weight_decay=0`、EMA `0.9999`；先训练 100 epochs、每 10 epochs 保存。
   这是学习实验的起点，不是保证收敛或生成质量的训练预算。现有 DiT 没有 dropout 参数，
-  YAML 中的 `dropout: 0` 仅满足现有 TrainerConfig 接口。
+  DiT YAML 不填写 UNet 的 `dropout`；入口给 TrainerConfig 的占位值为 0。
 - DiT 参数保持 FP32，由 trainer 在支持的 CUDA GPU 上启用 BF16 autocast；VAE 保持自己的精度策略。
   暂不开 `torch.compile`，便于调试；跑通后可使用 `--use-torch-compile`。
 - DDPM：1000 步线性噪声调度。DDIM：stride 20，包含末步，共 51 步，eta 0。
@@ -188,14 +198,19 @@ RTX PRO 6000 Blackwell 为 96GB，RTX 5090 为 32GB。初始建议分别为 batc
 其余模型/算法参数保持一致；未在这两张卡上实测峰值显存。batch 改变也会改变每 epoch 的更新次数
 及 EMA 对应的样本跨度，因此适合功能测试，但不是严格等价的训练对照。
 
-本机用已有 CIFAR 验证时，覆盖 `dataset_type`、`dataset`、`cache_dir` 和 split 即可。
+本机用已有 CIFAR 验证时，覆盖 `dataset_type`、`dataset`、`cache_dir` 和 split，并加 `--no-use-latent` 使用在线编码（仍为 DiT）。
 下面的 CPU smoke 命令将 CIFAR 缩放到 32，以缩短检查时间；它仅验证流程，不能用于判断 ImageNet 生成质量：
 
 ```bash
 # 安装依赖应在已有环境之外按需执行；不需要另建训练/采样入口。
 uv sync --extra latent-diffusion --extra clip-cfg
 
-# PRO 6000：ImageNet-100 / CFG / FM
+# 先生成 ImageNet-100 的 latent 缓存（只需一次；默认优先 CUDA，--device cpu 可显式覆盖）
+uv run --no-sync python utils/download_and_process_imagenet.py \
+  --repo-name clane9/imagenet-100 --split train --use-latent --image-size 256 \
+  --vae-model-name-or-path stabilityai/sdxl-vae --batch-size 8
+
+# PRO 6000：ImageNet-100 / CFG / FM，直接读取上述缓存
 uv run --no-sync python train/cfg_diffusion_train.py --config config/train/cfg-latent-fm.yaml
 
 # 5090：同一个网络，先降低 batch size
@@ -204,7 +219,7 @@ uv run --no-sync python train/cfg_diffusion_train.py --config config/train/cfg-l
 # 复用默认位置的本地 CIFAR 缓存，禁止数据和模型联网下载。
 # VAE 不在本地时，需要将 --vae-model-name-or-path 指向已有的 VAE 本地目录。
 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 uv run --no-sync python train/diffusion_train.py \
-  --config config/train/latent-fm.yaml --dataset-type cifar10 --dataset uoft-cs/cifar10 \
+  --config config/train/latent-fm.yaml --no-use-latent --dataset-type cifar10 --dataset uoft-cs/cifar10 \
   --dataset-split 'train[:8]' --cache-dir "$HOME/.cache/huggingface/datasets" \
   --image-size 32 --batch-size 2 --epoches 1 --save-interval-epoch 1 \
   --device cpu --num-workers 0 --step 0.5 --wandb-mode disabled \
@@ -218,8 +233,16 @@ uv run --no-sync python sample/cfg_diffusion_sample.py --config config/test/cfg-
 采样时 VAE、图像尺寸和 DiT 结构必须与训练一致。CIFAR smoke 的权重应覆盖 `--image-size 32`，
 并传入 smoke 使用的同一个 VAE。采样入口优先使用 DiT-only EMA，同时从完整 checkpoint 恢复 VAE；
 没有 EMA 时恢复完整模型，也兼容 `torch.compile` 添加的 DiT 权重前缀。
-`sample_posterior` 只影响训练图片编码；这四个入口当前读取图像 dataset。
-之前 trainer 的缓存 latent / `(mu, std)` 接口仍可在 Python 中配合自定义 DataLoader 使用。
+`sample_posterior` 同时控制在线 VAE 编码和缓存 posterior 的采样：true 使用 `mean + std * noise`，
+false 使用 mean。两条路径都由 trainer/模型约定完成一次 scaling factor 变换。
+
+预处理脚本默认仍使用原来的 `split=all`；上面的命令显式选择 `--split train`，与训练 YAML 一致。
+`--use-latent` 隐含按 `--image-size` resize/crop，之后调用 `to_latent`；默认保存到
+`datasets/imagenet-100-256x256-train-latent`，包含原始 mean/std 和标签元数据。
+预处理的 `--save-dir` 与训练的 `latent_cache_dir` 必须指向同一缓存根目录，二者都不是 checkpoint 目录。
+训练入口不会自动下载源图片或创建缺失的 latent 缓存；缺失时会提示先运行预处理脚本。
+CFG 缓存 loader 返回 `((mean, std), (context, attention_mask))`，用 `PROMPT_TEMPLATES` 缓存类别文本条件。
+不同 VAE 使用不同缓存目录，且预处理、训练和采样使用同一个 VAE。
 
 ### 配置依据
 

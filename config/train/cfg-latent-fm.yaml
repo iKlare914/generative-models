@@ -2,7 +2,8 @@
 # Learning baseline: 8-layer, width-256 DiT; frozen SDXL VAE. See config/README.md.
 # RTX PRO 6000 Blackwell 96GB: batch_size 128; RTX 5090 32GB: start with --batch-size 32.
 # Batch sizes are conservative starting points, not measured memory guarantees.
-use_latent: true  # 入口开关：true 使用冻结 VAE + DiT；false 使用 UNet
+model_type: dit  # 模型架构；DiT 与 UNet 使用独立的参数集
+use_latent: true  # 训练读取缓存 mean/std；false 仍是 DiT、改为在线编码图片
 image_size: 256  # RGB 图像边长；DiT.image_size 由此除以 VAE 下采样倍数得到 (H, W)
 vae_model_name_or_path: stabilityai/sdxl-vae  # LatentDiffusion.from_pretrained_vae 同名参数：VAE 仓库 ID 或本地目录
 vae_slicing: true  # 调用 vae.enable_slicing()，按 batch 逐张编解码以节省显存
@@ -15,12 +16,12 @@ d_feature: 512  # 文本特征维度；传给 DiT.d_feature 或 CFGUNet.feature_
 dataset_type: imagenet  # 入口选择的图像 loader：cifar10 或 imagenet
 dataset: clane9/imagenet-100  # 传给 loader 的 repo_name：数据集仓库 ID
 dataset_split: train  # 传给 loader 的 split；训练通常用 train
-sample_posterior: true  # VAE posterior：true 采样 mu + std * noise；false 使用 mu
+latent_cache_dir: ../../datasets  # LatentImagenetDataset.save_dir，须匹配预处理脚本 --save-dir
+sample_posterior: true  # 对缓存 mean/std 采样；false 使用 mean，由 trainer 统一乘 scaling_factor
 method: fm  # 训练算法选择：ddpm 预测噪声，fm 预测速度
 epoches: 100  # TrainerConfig.epoches：目标总训练轮数（沿用现有代码的拼写）
 batch_size: 128  # TrainerConfig / DataLoader.batch_size：每次更新的样本数
 lr: 0.0001  # AdamW.lr：学习率
-dropout: 0.0  # UNet.dropout；当前 DiT 不使用此参数，latent 配置设为 0
 weight_decay: 0.0  # AdamW.weight_decay：权重衰减
 step: 0.02  # FMSampler / CFGFMSampler.step：采样积分步长；不离散化训练时间
 solver: euler  # FM sampler.solver：目前支持 euler

@@ -1,8 +1,19 @@
-from dataclasses import replace
-from pathlib import Path
+from __future__ import annotations
 
-from datasets import Dataset, Image as DatasetImage
+from dataclasses import replace
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING
+from uuid import uuid4
+
+import numpy as np
+import torch as th
+from datasets import Array3D, Dataset, Features, Image as DatasetImage, load_from_disk
 from PIL import Image
+
+if TYPE_CHECKING:
+    from diffusers import AutoencoderKL
 
 
 DATASET_DIR = Path(__file__).resolve().parents[3] / "datasets"
@@ -108,3 +119,135 @@ def resize_image_dataset(
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     resized.save_to_disk(output_dir)
     return resized
+
+
+def get_latent_dataset_dir(repo_name, image_size, split=None, save_dir=None) -> Path:
+    """Return save_dir/<repo_name>-<H>x<W>-<split>-latent."""
+    size = (image_size, image_size) if type(image_size) is int else image_size
+    resized_dir = get_resized_dataset_dir(repo_name, size, split, save_dir)
+    return resized_dir.with_name(resized_dir.name + '-latent')
+
+
+def to_latent(
+    dataset: Dataset,
+    vae: AutoencoderKL,
+    save_dir: str | Path | None = None,
+    batch_size: int = 8,
+    *,
+    repo_name: str | None = None,
+    split: str | None = None,
+    device: str | th.device | None = None,
+) -> Dataset:
+    """Encode an image Dataset with a pretrained HF VAE and save its posterior.
+
+    All Image columns are converted to RGB, normalized from [0, 255] to [-1, 1],
+    and replaced by {mean: float32[C,H,W], std: float32[C,H,W]}. Other columns
+    and their feature metadata are preserved. No posterior sampling or latent
+    scaling is performed. Images must already share a size divisible by the
+    VAE downsampling factor; use resize_image_dataset first when needed.
+
+    CUDA is preferred when device is omitted, otherwise CPU is used. Encoding
+    runs without gradients or autocast, and respects the VAE's force_upcast
+    setting. The supplied VAE's original device, dtype and training mode are
+    restored afterwards; its requires_grad flags are unchanged.
+
+    Output is DATASET_DIR (or save_dir)/<repo_name>-<H>x<W>-<split>-latent.
+    Use separate save_dir roots for different VAE checkpoints. Existing output
+    is never overwritten. Arrow batches are written in a temporary directory;
+    only a completed save is published. The returned Dataset reads that cache.
+    """
+    if not isinstance(dataset, Dataset):
+        raise TypeError('dataset must be a single Hugging Face Dataset.')
+    if type(batch_size) is not int or batch_size <= 0:
+        raise ValueError('batch_size must be a positive integer.')
+    if len(dataset) == 0:
+        raise ValueError('Cannot encode an empty dataset.')
+    image_columns = [name for name, feature in dataset.features.items() if isinstance(feature, DatasetImage)]
+    if not image_columns:
+        raise ValueError('dataset must contain at least one Image column.')
+    prepared = dataset.with_format(None)
+    for column in image_columns:
+        feature = prepared.features[column]
+        if not feature.decode:
+            prepared = prepared.cast_column(column, replace(feature, decode=True))
+    first_image = prepared[0][image_columns[0]]
+    if first_image is None:
+        raise ValueError('Image columns cannot contain missing images.')
+    width, height = first_image.size
+    output_dir = get_latent_dataset_dir(
+        dataset.info.dataset_name if repo_name is None else repo_name,
+        (height, width), dataset.split if split is None else split, save_dir,
+    )
+    if output_dir.exists():
+        raise FileExistsError(f'Output directory already exists: {output_dir}')
+    downsample = 2 ** (len(vae.config.block_out_channels) - 1)
+    if height % downsample or width % downsample:
+        raise ValueError(f'Image height and width must be divisible by the VAE downsampling factor ({downsample}).')
+    if vae.config.in_channels != 3:
+        raise ValueError('to_latent requires a VAE with three input channels for RGB images.')
+    latent_shape = (vae.config.latent_channels, height // downsample, width // downsample)
+    features = Features(dict(prepared.features))
+    for column in image_columns:
+        features[column] = {
+            'mean': Array3D(shape=latent_shape, dtype='float32'),
+            'std': Array3D(shape=latent_shape, dtype='float32'),
+        }
+
+    parameter = next(vae.parameters())
+    original_device, original_dtype = parameter.device, parameter.dtype
+    was_training = vae.training
+    device = th.device(device) if device is not None else th.device('cuda' if th.cuda.is_available() else 'cpu')
+    dtype = th.float32 if getattr(vae.config, 'force_upcast', False) else original_dtype
+
+    @th.no_grad()
+    def transform(batch):
+        result = {}
+        for column in image_columns:
+            images = []
+            for image in batch[column]:
+                if image is None or image.size != (width, height):
+                    raise ValueError('All images must be present and have the same size; resize the dataset first.')
+                pixels = np.array(image.convert('RGB'), dtype=np.float32)
+                images.append(th.from_numpy(pixels).permute(2, 0, 1).contiguous() / 127.5 - 1)
+            inputs = th.stack(images).to(device=device, dtype=dtype)
+            with th.autocast(device_type=device.type, enabled=False):
+                posterior = vae.encode(inputs).latent_dist
+                mean = posterior.mean.float().cpu()
+                # HF DiagonalGaussianDistribution already computes std = exp(0.5 * logvar).
+                std = posterior.std.float().cpu()
+            if tuple(mean.shape[1:]) != latent_shape or mean.shape != std.shape:
+                raise ValueError('VAE posterior shape does not match its configured latent dimensions.')
+            if not th.isfinite(mean).all() or not th.isfinite(std).all():
+                raise ValueError('VAE produced non-finite posterior parameters.')
+            result[column] = [
+                {'mean': mean_i.numpy(), 'std': std_i.numpy()}
+                for mean_i, std_i in zip(mean, std)
+            ]
+        return result
+
+    try:
+        vae.to(device=device, dtype=dtype).eval()
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(prefix=f'.{output_dir.name}-', dir=output_dir.parent) as temporary:
+            temporary = Path(temporary)
+            encoded = prepared.map(
+                transform, batched=True, batch_size=batch_size, writer_batch_size=batch_size,
+                features=features, num_proc=None, load_from_cache_file=False,
+                cache_file_name=str(temporary / 'encoded.arrow'), new_fingerprint=uuid4().hex,
+                desc='Encode VAE posterior (mean/std)',
+            )
+            saved = temporary / 'dataset'
+            encoded.save_to_disk(saved)
+            metadata = {
+                'image_size': [height, width], 'image_columns': image_columns,
+                'representation': 'mean_std', 'scaled': False,
+                'vae_model_name_or_path': str(getattr(vae.config, '_name_or_path', '')),
+                'scaling_factor': float(vae.config.scaling_factor),
+            }
+            (saved / 'latent_info.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
+            if output_dir.exists():
+                raise FileExistsError(f'Output directory already exists: {output_dir}')
+            saved.rename(output_dir)
+    finally:
+        vae.to(device=original_device, dtype=original_dtype).train(was_training)
+    return load_from_disk(output_dir)

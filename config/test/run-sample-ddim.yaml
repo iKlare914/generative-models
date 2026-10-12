@@ -1,6 +1,5 @@
 # Entry point: sample/diffusion_sample.py
 # Relative file paths are resolved from this YAML directory. CLI options override YAML.
-use_latent: false  # 保留原来的像素空间 UNet 模式
 model_path: ../../checkpoints/cifar10-20260925-1/00000768_00010.136794_checkpoint.pt  # 采样 checkpoint 路径；null 时需通过 CLI 指定，优先加载 EMA
 output_path: null  # 采样图片保存路径；null 时显示图片
 image_size: 32  # UNet.image_size：RGB 图像边长，直接在像素空间训练/采样

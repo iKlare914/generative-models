@@ -1,7 +1,8 @@
 # Entry: sample/cfg_diffusion_sample.py
 # Architecture/VAE must match config/train/cfg-latent-ddpm.yaml.
 # Supply --model-path to the checkpoint saved by that training run. EMA is preferred.
-use_latent: true  # 入口开关：true 使用冻结 VAE + DiT；false 使用 UNet
+model_type: dit  # 采样架构由此决定，使用 DiT + VAE 解码
+use_latent: true  # 对应训练数据的缓存标记；采样不读取数据集，不使用此开关选择模型
 image_size: 256  # RGB 图像边长；DiT.image_size 由此除以 VAE 下采样倍数得到 (H, W)
 vae_model_name_or_path: stabilityai/sdxl-vae  # LatentDiffusion.from_pretrained_vae 同名参数：VAE 仓库 ID 或本地目录
 vae_slicing: true  # 调用 vae.enable_slicing()，按 batch 逐张编解码以节省显存
@@ -17,7 +18,7 @@ sample: ddim  # 采样算法选择；ddim 使用 ddpm 训练权重
 num_timesteps: 1000  # make_beta_schedule.num_timesteps：DDPM 训练噪声调度长度，采样须一致
 spacing: 20  # DDIMSampler / CFGDDIMSampler.spacing：原始时间步索引的采样间隔
 randomness: 0.0  # sampler.randomness：DDIM 的 eta 或 FM 随机强度；0 为确定性更新
-random_init: false  # CFG 采样开关：使用未训练模型检查流程，与 model_path 互斥
+random_init: false  # true 使用随机初始化的 UNet/DiT 检查流程；false 需提供 model_path；不控制 CFG
 text_model_name: openai/clip-vit-base-patch32  # 文本编码器仓库 ID 或本地目录；CLIP 在 CPU 上运行
 eval_max_length: 32  # CFG sampler.eval_max_length：采样文本 token 长度
 guidance_scale: 3.0  # CFG sampler.guidance_scale：0 无条件、1 纯条件、>1 增强条件引导
