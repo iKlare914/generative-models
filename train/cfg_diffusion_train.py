@@ -18,7 +18,8 @@ from generative_model.dataset.load_dataset import getCifarCLIPLoader
 from generative_model.cli_config import parse_args_with_config
 from generative_model.models.unet import CFGUNet
 from generative_model.sampler import CFGDDPMSampler, CFGFMSampler, FMTimestepSampler, TimestepSampler, make_beta_schedule
-from generative_model.trainer import CFGTrainer
+from generative_model.trainer.diffusion import CFGTrainer
+from generative_model.trainer.flow_matching import CFGFMTrainer
 from generative_model.dataset.text_encoder import CLIPTextEncoder
 
 
@@ -146,6 +147,7 @@ def main(argv=None):
         num_heads=args.num_heads, image_size=args.image_size,
         use_conv=args.use_conv, attn_o_proj_zeroinit=args.attn_o_proj_zeroinit,
     ).to(device)
+    trainer_class = CFGFMTrainer if args.method == 'fm' else CFGTrainer
     if args.method == 'fm':
         sampler = CFGFMSampler(
             args.fm_step, model, device=device, text_encoder=encoder, solver=args.solver,
@@ -164,7 +166,7 @@ def main(argv=None):
         text_encoder=encoder, max_length=args.train_max_length, label_drop_rate=args.label_drop_rate,
     )
     print(f'Training on {len(loader.dataset)} images; {len(loader)} batches per epoch', flush=True)
-    trainer = CFGTrainer(
+    trainer = trainer_class(
         model=model, data=loader, diffusion_sampler=sampler,
         timestep_sampler=timestep_sampler, config=config,
     )

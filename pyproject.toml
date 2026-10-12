@@ -27,6 +27,9 @@ clip-cfg = [
     "matplotlib>=3.11.2",
     "transformers>=5.18.0",
 ]
+latent-diffusion = [
+    "diffusers[torch]>=0.41.0",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
