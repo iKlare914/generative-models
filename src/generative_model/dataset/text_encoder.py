@@ -1,4 +1,4 @@
-"""CLIP text encoding and CIFAR-10 prompt generation."""
+"""CLIP text encoding, shared prompt templates, and CIFAR-10 prompt generation."""
 
 import numpy as np
 import torch as th
@@ -8,7 +8,7 @@ CIFAR10_LABELS = {
     0: "airplane", 1: "automobile", 2: "bird", 3: "cat", 4: "deer",
     5: "dog", 6: "frog", 7: "horse", 8: "ship", 9: "truck",
 }
-CIFAR10_PROMPT_TEMPLATES = (
+PROMPT_TEMPLATES = (
     "a photo of a {}",
     "a {}",
     "a image of a {}",
@@ -92,7 +92,7 @@ def get_cifar10_prompt(
     if nums <= 0:
         raise ValueError("nums must be positive.")
     labels = np.random.randint(0, 10, size=nums)
-    templates = np.random.choice(CIFAR10_PROMPT_TEMPLATES, size=nums)
+    templates = np.random.choice(PROMPT_TEMPLATES, size=nums)
     prompts = [template.format(CIFAR10_LABELS[label]) for label, template in zip(labels, templates)]
     encoder = text_encoder if text_encoder is not None else CLIPTextEncoder()
     context, mask = encoder.encode_prompts(prompts, max_length=max_length, device=device)

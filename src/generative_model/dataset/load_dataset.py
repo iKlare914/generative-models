@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader, Dataset
 import numpy as np
 import torch as th
 from generative_model.dataset import image_transforms
-from generative_model.dataset.text_encoder import CLIPTextEncoder, CIFAR10_LABELS, CIFAR10_PROMPT_TEMPLATES
+from generative_model.dataset.text_encoder import CLIPTextEncoder, CIFAR10_LABELS, PROMPT_TEMPLATES
 
 class CifarDataset(Dataset):
     def __init__(self, name, split, image_size=None, cache_dir=None):
@@ -106,7 +106,7 @@ class CifarCLIPDataset(CifarDataset):
             raise ValueError("label_drop_rate must be between 0 and 1.")
         self.label_drop_rate = label_drop_rate
         self.label2text = CIFAR10_LABELS.copy()
-        self.prompt_template = list(CIFAR10_PROMPT_TEMPLATES)
+        self.prompt_template = list(PROMPT_TEMPLATES)
         self.max_length = max_length
         prompts = [""] + [template.format(label) for label in self.label2text.values() for template in self.prompt_template]
         encoder = text_encoder if text_encoder is not None else CLIPTextEncoder()
@@ -166,21 +166,28 @@ class ImagenetCLIPDataset(ImagenetDataset):
             label: name.split(',')[0].replace('_', ' ').strip()
             for label, name in enumerate(names)
         }
-        self.prompts = ['a photo of a ' + text for text in self.label2text.values()]
-        prompts = [''] + self.prompts
+        self.prompt_template = list(PROMPT_TEMPLATES)
+        self.max_length = max_length
+        # Keep one fixed prompt per class for trainer sample logging.
+        self.prompts = [self.prompt_template[0].format(text) for text in self.label2text.values()]
+        prompts = [''] + [template.format(text) for text in self.label2text.values() for template in self.prompt_template]
         encoder = text_encoder if text_encoder is not None else CLIPTextEncoder()
         contexts, masks = [], []
         for start in range(0, len(prompts), 64):
             context, mask = encoder.encode_prompts(prompts[start:start + 64], max_length=max_length)
             contexts.append(context.cpu())
             masks.append(mask.cpu())
-        self.context = th.cat(contexts)
-        self.attention_mask = th.cat(masks)
+        self.hidden_state_table = dict(zip(prompts, th.cat(contexts).unbind(0)))
+        self.attention_mask_table = dict(zip(prompts, th.cat(masks).unbind(0)))
 
     def __getitem__(self, index):
         image, label = super().__getitem__(index)
-        prompt_index = 0 if np.random.random() < self.label_drop_rate else label + 1
-        return image, (self.context[prompt_index], self.attention_mask[prompt_index])
+        prompt = '' if np.random.random() < self.label_drop_rate else self.get_prompt(label)
+        return image, (self.hidden_state_table[prompt], self.attention_mask_table[prompt])
+
+    def get_prompt(self, label):
+        """Choose a shared prompt template for the given ImageNet class."""
+        return np.random.choice(self.prompt_template).format(self.label2text[label])
 
 def getCifarLoader(repo_name, split, batch_size=8, shuffle=True, num_workers=8, image_size=None, cache_dir=None, drop_last=True):
     dataset = CifarDataset(repo_name, split, image_size=image_size, cache_dir=cache_dir)
